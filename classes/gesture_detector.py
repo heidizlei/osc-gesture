@@ -8,7 +8,7 @@ MCPS4 = [5, 9, 13, 17]       # palm MCPs (no thumb)
 class _HandState:
     """Per-hand stateful tracking for slower and faster gestures."""
     __slots__ = ('t_open', 'fist_start_t', 'fist_pending', 'fist_intensity',
-                 'index_since', 'index_last_ok')
+                 'index_since', 'index_last_ok', 'mean_ext')
 
     def __init__(self):
         self.t_open         = None   # last t where mean_ext > T_OPEN
@@ -17,6 +17,7 @@ class _HandState:
         self.fist_intensity = 0.0
         self.index_since    = None   # when index-extended pose began (for hold timer)
         self.index_last_ok  = None   # last t where index_ok was True (for dropout tolerance)
+        self.mean_ext       = 0.0    # latest mean finger extension (for debug display)
 
 
 class GestureDetector:
@@ -59,6 +60,7 @@ class GestureDetector:
         self._hand_states = [_HandState(), _HandState()]
         self._last_report = 0.0
         self._result      = ('noop', 0.0)
+        self.debug_scores = [{}, {}]                        # populated each _detect() call
 
     # ------------------------------------------------------------------
     # Public interface
@@ -110,6 +112,7 @@ class GestureDetector:
         s   = self._hand_states[hi]
         ext = self._extension(h)
         me  = float(ext.mean())
+        s.mean_ext = me
 
         index_ok = (ext[1] > self.T_INDEX_EXT and
                     ext[2] < self.T_OTHERS_CURL and
@@ -228,6 +231,32 @@ class GestureDetector:
     # ------------------------------------------------------------------
 
     def _detect(self, now):
+        # Build per-hand debug snapshot before the main detection loop
+        dbg = []
+        for hi in range(2):
+            s = self._hand_states[hi]
+            times, lms = self._hand_window(hi, 0.5)
+            feat = self._motion_features(times, lms)
+            ang_vel = self._palm_angular_vel(times, lms) if len(times) >= 2 else 0.0
+            index_hold = (now - s.index_since) if s.index_since is not None else 0.0
+            dbg.append({
+                'tip_artic':      feat['tip_artic']  if feat else None,
+                'mcp_speed':      feat['mcp_speed']  if feat else None,
+                'ext_change':     feat['ext_change'] if feat else None,
+                'ang_vel':        ang_vel,
+                'index_hold':     index_hold,
+                'mean_ext':       s.mean_ext,
+                'fist_pending':   s.fist_pending,
+                'fist_intensity': s.fist_intensity,
+                'is_chord': bool(feat and
+                                 feat['mcp_speed']  >= self.T_CHORD_MCP and
+                                 feat['tip_artic']  >= self.T_CHORD_TIP_ARTIC),
+                'is_run':   bool(feat and
+                                 feat['tip_artic']  >= self.T_RUN_TIP_ARTIC and
+                                 feat['ext_change'] >= self.T_RUN_EXT),
+            })
+        self.debug_scores = dbg
+
         best_mode, best_intensity = 'noop', 0.0
 
         for hi in range(2):

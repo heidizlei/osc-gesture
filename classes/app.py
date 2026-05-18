@@ -54,6 +54,7 @@ class OSCGestureApp:
         # Gesture detection
         self.gesture_detector = GestureDetector()
         self.gesture_result   = ('noop', 0.0)
+        self.debug_mode       = False  # toggle with 'd' key
 
         # Hand presence tracking
         self.hand_present = False
@@ -89,6 +90,94 @@ class OSCGestureApp:
         if filled > 0:
             cv2.rectangle(frame, (bar_x, bar_y), (bar_x + filled, bar_y + bar_h),
                           color, -1)
+
+    def _draw_debug_hud(self, frame):
+        """Overlay raw decision scores for each hand (toggle with 'd')."""
+        det  = self.gesture_detector
+        DIM  = (80,  80,  80)    # dimmed label colour
+        OK   = (20,  130, 20)    # value meets threshold  (dark green)
+        FAIL = (180, 30,  30)    # value misses threshold (dark red)
+        INFO = (50,  50,  50)    # neutral info
+        HDR  = (100, 80,  0)     # header (dark amber)
+        BG   = (255, 255, 255)   # white background
+
+        x, y, lh = 20, 82, 36
+        pad = 6  # background padding around text
+
+        def _bg_rect(text, font_scale, thickness=1):
+            """Draw a white filled rect behind the upcoming text at (x, y)."""
+            (tw, th), bl = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX,
+                                           font_scale, thickness)
+            cv2.rectangle(frame,
+                          (x - pad, y - th - pad),
+                          (x + tw + pad, y + bl + pad),
+                          BG, -1)
+
+        _bg_rect("[ DEBUG SCORES ]", 0.90)
+        cv2.putText(frame, "[ DEBUG SCORES ]", (x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.90, HDR, 1, cv2.LINE_AA)
+        y += lh
+
+        def _put(text, col):
+            nonlocal y
+            _bg_rect(text, 0.80)
+            cv2.putText(frame, text, (x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.80, col, 1, cv2.LINE_AA)
+            y += lh
+
+        for hi, sc in enumerate(det.debug_scores):
+            _put(f"Hand {hi}:", INFO)
+
+            if sc.get('tip_artic') is None:
+                _put("  (no data)", DIM)
+                continue
+
+            ta  = sc['tip_artic']
+            mcp = sc['mcp_speed']
+            ext = sc['ext_change']
+            av  = sc['ang_vel']
+
+            # tip_artic — used by both run and chord rules
+            ta_ok_run   = ta  >= det.T_RUN_TIP_ARTIC
+            ta_ok_chord = ta  >= det.T_CHORD_TIP_ARTIC
+            _put(f"  tip_artic  {ta:.3f}"  +
+                 f"  run>={det.T_RUN_TIP_ARTIC}"  + (" Y" if ta_ok_run   else " N") +
+                 f"  chord>={det.T_CHORD_TIP_ARTIC}" + (" Y" if ta_ok_chord else " N"),
+                 OK if ta_ok_chord else (OK if ta_ok_run else FAIL))
+
+            # mcp_speed — chord rule only
+            mcp_ok = mcp >= det.T_CHORD_MCP
+            _put(f"  mcp_speed  {mcp:.3f}  chord>={det.T_CHORD_MCP}" +
+                 (" Y" if mcp_ok else " N"),
+                 OK if mcp_ok else FAIL)
+
+            # ext_change — run rule only
+            ext_ok = ext >= det.T_RUN_EXT
+            _put(f"  ext_change {ext:.3f}  run>={det.T_RUN_EXT}" +
+                 (" Y" if ext_ok else " N"),
+                 OK if ext_ok else FAIL)
+
+            # angular velocity — faster rule
+            av_ok = av >= det.T_ROTATE
+            _put(f"  ang_vel    {av:.3f}  faster>={det.T_ROTATE}" +
+                 (" Y" if av_ok else " N"),
+                 OK if av_ok else FAIL)
+
+            # index hold / mean_ext / fist
+            idx = sc['index_hold']
+            me  = sc['mean_ext']
+            fi  = sc['fist_intensity']
+            fp  = sc['fist_pending']
+            _put(f"  idx_hold={idx:.2f}s  me={me:.2f}  fist={'P' if fp else 'F'}({fi:.2f})",
+                 INFO)
+
+            # decision summary
+            chord_s = "CHORD" if sc['is_chord'] else "chord"
+            run_s   = "RUN"   if sc['is_run']   else "run"
+            _put(f"  → {chord_s}  {run_s}",
+                 OK if (sc['is_chord'] or sc['is_run']) else DIM)
+
+            y += 4  # small gap between hands
 
     # ----------------------------
     # OSC sending
@@ -235,6 +324,8 @@ class OSCGestureApp:
                 if self.draw_landmarks:
                     annotated = HandLandmarkDrawer.draw_landmarks(annotated, results)
                 self._draw_gesture_hud(annotated, *self.gesture_result)
+                if self.debug_mode:
+                    self._draw_debug_hud(annotated)
                 cv2.imshow("Hand Camera", annotated)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
@@ -242,6 +333,9 @@ class OSCGestureApp:
                 elif key == ord('l'):
                     self.draw_landmarks = not self.draw_landmarks
                     print("Draw landmarks:", self.draw_landmarks)
+                elif key == ord('d'):
+                    self.debug_mode = not self.debug_mode
+                    print("Debug mode:", self.debug_mode)
 
             if frame_counter % 300 == 0:
                 gc.collect()
