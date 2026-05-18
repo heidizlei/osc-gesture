@@ -3,7 +3,16 @@ import cv2
 import numpy as np
 from pythonosc import udp_client
 from .tracker import HandTracker, HandLandmarkDrawer
+from .gesture_detector import GestureDetector
 import gc
+
+_MODE_COLORS = {
+    'noop':   (160, 160, 160),
+    'runs':   (80,  200, 80),
+    'chords': (200, 200, 80),
+    'faster': (80,  200, 200),
+    'slower': (80,  80,  220),
+}
 
 
 class OSCGestureApp:
@@ -42,6 +51,10 @@ class OSCGestureApp:
         self.last_osc_time = time.time()
         self.inactivity_message_sent = False
 
+        # Gesture detection
+        self.gesture_detector = GestureDetector()
+        self.gesture_result   = ('noop', 0.0)
+
         # Hand presence tracking
         self.hand_present = False
         self.last_hand_present = False
@@ -49,6 +62,33 @@ class OSCGestureApp:
         # Only top part of camera image is active for control
         self.active_area_ratio = 3 / 4
 
+
+    # ----------------------------
+    # Gesture detection
+    # ----------------------------
+
+    def _extract_world_landmarks(self, results):
+        """Convert MediaPipe results to (2, 21, 3) float32 array, NaN for missing hands."""
+        wl = np.full((2, 21, 3), np.nan, dtype=np.float32)
+        if results and results.hand_world_landmarks:
+            for i, hand in enumerate(results.hand_world_landmarks[:2]):
+                for j, lm in enumerate(hand):
+                    wl[i, j] = (lm.x, lm.y, lm.z)
+        return wl
+
+    def _draw_gesture_hud(self, frame, mode, intensity):
+        color = _MODE_COLORS.get(mode, (160, 160, 160))
+        label = f"{mode}  {intensity:.2f}"
+        cv2.putText(frame, label, (20, 42),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 2, cv2.LINE_AA)
+        # intensity bar (200 px wide)
+        bar_x, bar_y, bar_h = 20, 52, 12
+        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + 200, bar_y + bar_h),
+                      (60, 60, 60), -1)
+        filled = int(intensity * 200)
+        if filled > 0:
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + filled, bar_y + bar_h),
+                          color, -1)
 
     # ----------------------------
     # OSC sending
@@ -142,6 +182,10 @@ class OSCGestureApp:
 
                 self.hand_present = bool(results and results.hand_landmarks)
 
+                # Gesture detection (runs every frame, reports every 500 ms)
+                wl = self._extract_world_landmarks(results)
+                self.gesture_result = self.gesture_detector.update(wl, time.time())
+
                 # Send pause/unpause only when state changes
                 if self.hand_present != self.last_hand_present:
                     if self.hand_present:
@@ -190,6 +234,7 @@ class OSCGestureApp:
                 # ---- show camera ----
                 if self.draw_landmarks:
                     annotated = HandLandmarkDrawer.draw_landmarks(annotated, results)
+                self._draw_gesture_hud(annotated, *self.gesture_result)
                 cv2.imshow("Hand Camera", annotated)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
