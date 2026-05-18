@@ -36,7 +36,7 @@ class GestureDetector:
 
     # Detection thresholds
     T_CHORD_MCP        = 0.25   # m/s — mcp_speed_wr (palm pivot) floor for chords
-    T_CHORD_TIP_ARTIC  = 0.30   # m/s — tip_artic (finger flex) floor for chords
+    T_CHORD_TIP_DISP   = 0.08   # m   — tip displacement range in wrist frame, floor for chords
     T_RUN_TIP_ARTIC    = 0.15   # m/s — tip_artic floor for runs
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
     T_ROTATE      = 1.0    # rad/s
@@ -167,15 +167,17 @@ class GestureDetector:
 
     def _motion_features(self, times, lms):
         """
-        Returns dict(tip_artic, mcp_speed, ext_change) from a frame sequence,
-        or None if fewer than 2 frames are available.
+        Returns dict(tip_artic, tip_disp, mcp_speed, ext_change), or None if < 2 frames.
 
-        tip_artic   — mean fingertip speed relative to its OWN MCP joint (m/s).
-                       Pure finger articulation, invariant to palm/wrist motion.
+        tip_artic   — mean fingertip speed relative to its OWN MCP (m/s).
+                       Pure finger articulation; used for run detection.
+        tip_disp    — mean peak-to-peak displacement of tips in wrist frame (m).
+                       Chord petting sweeps tips far from their resting position;
+                       individual finger strikes in runs stay local. Used for chord gate.
         mcp_speed   — speed of palm centroid in wrist-relative frame (m/s).
-                       Captures the palm pivot motion of chord gestures.
-        ext_change  — rate of change of finger extension ratios (1/s).
-                       Articulation magnitude — fingers flexing/extending.
+                       Palm pivot signal; used as the primary chord threshold.
+        ext_change  — mean rate of change of finger extension ratios (1/s).
+                       Discriminates active runs from idle drift.
         """
         if len(times) < 2:
             return None
@@ -191,8 +193,13 @@ class GestureDetector:
             ).mean()
         )
 
+        # tip_disp — peak-to-peak range of each tip in wrist frame, mean over fingers
+        tip_wr  = h[:, TIPS] - h[:, [0]]         # (N, 5, 3)
+        tip_range = tip_wr.max(axis=0) - tip_wr.min(axis=0)   # (5, 3)
+        tip_disp = float(np.linalg.norm(tip_range, axis=1).mean())
+
         # mcp_speed — palm centroid in wrist-relative frame (chord pivot signal)
-        mcp_wr = h[:, MCPS4] - h[:, [0]]   # (N, 4, 3)
+        mcp_wr = h[:, MCPS4] - h[:, [0]]         # (N, 4, 3)
         mcp_speed = float(
             np.linalg.norm(
                 np.diff(mcp_wr.mean(axis=1), axis=0) / dt[:, None], axis=1
@@ -206,7 +213,8 @@ class GestureDetector:
             ext[:, i] = np.linalg.norm(tv, axis=1) / (np.linalg.norm(mv, axis=1) + 1e-6)
         ext_change = float((np.abs(np.diff(ext, axis=0)) / dt[:, None]).mean())
 
-        return {'tip_artic': tip_artic, 'mcp_speed': mcp_speed, 'ext_change': ext_change}
+        return {'tip_artic': tip_artic, 'tip_disp': tip_disp,
+                'mcp_speed': mcp_speed, 'ext_change': ext_change}
 
     def _palm_angular_vel(self, times, lms):
         """Mean |angular velocity of palm normal around forearm axis| in rad/s."""
@@ -249,8 +257,8 @@ class GestureDetector:
                 'fist_pending':   s.fist_pending,
                 'fist_intensity': s.fist_intensity,
                 'is_chord': bool(feat and
-                                 feat['mcp_speed']  >= self.T_CHORD_MCP and
-                                 feat['tip_artic']  >= self.T_CHORD_TIP_ARTIC),
+                                 feat['mcp_speed'] >= self.T_CHORD_MCP and
+                                 feat['tip_disp']  >= self.T_CHORD_TIP_DISP),
                 'is_run':   bool(feat and
                                  feat['tip_artic']  >= self.T_RUN_TIP_ARTIC and
                                  feat['ext_change'] >= self.T_RUN_EXT),
@@ -287,10 +295,11 @@ class GestureDetector:
             if feat is None:
                 continue
 
-            # Chord: palm pivots (high mcp_speed) AND fingers flex with it (high tip_artic).
-            # The conjunction is what separates chords from vigorous runs.
+            # Chord: palm pivots (mcp_speed) AND tips sweep a large arc relative to wrist
+            # (tip_disp). Runs make short local finger strokes — small tip_disp even when
+            # the overall hand moves.
             is_chord = (feat['mcp_speed'] >= self.T_CHORD_MCP and
-                        feat['tip_artic'] >= self.T_CHORD_TIP_ARTIC)
+                        feat['tip_disp']  >= self.T_CHORD_TIP_DISP)
             if is_chord:
                 intensity = float(np.clip(feat['mcp_speed'] / self.NORM_CHORD, 0.0, 1.0))
                 if intensity > best_intensity:
