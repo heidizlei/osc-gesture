@@ -8,16 +8,18 @@ MCPS4 = [5, 9, 13, 17]       # palm MCPs (no thumb)
 class _HandState:
     """Per-hand stateful tracking for slower and faster gestures."""
     __slots__ = ('t_open', 'fist_start_t', 'fist_pending', 'fist_intensity',
-                 'index_since', 'index_last_ok', 'mean_ext')
+                 'index_since', 'index_last_ok', 'mean_ext',
+                 'index_ext_since')
 
     def __init__(self):
-        self.t_open         = None   # last t where mean_ext > T_OPEN
-        self.fist_start_t   = None   # when current fist epoch began
-        self.fist_pending   = False  # fist confirmed, not yet reported
-        self.fist_intensity = 0.0
-        self.index_since    = None   # when index-extended pose began (for hold timer)
-        self.index_last_ok  = None   # last t where index_ok was True (for dropout tolerance)
-        self.mean_ext       = 0.0    # latest mean finger extension (for debug display)
+        self.t_open          = None   # last t where mean_ext > T_OPEN
+        self.fist_start_t    = None   # when current fist epoch began
+        self.fist_pending    = False  # fist confirmed, not yet reported
+        self.fist_intensity  = 0.0
+        self.index_since     = None   # when full faster pose began (index out + others curled)
+        self.index_last_ok   = None   # last t where index_ok was True (for dropout tolerance)
+        self.mean_ext        = 0.0    # latest mean finger extension (for debug display)
+        self.index_ext_since = None   # when index alone became extended (runs suppression gate)
 
 
 class GestureDetector:
@@ -35,9 +37,9 @@ class GestureDetector:
     MAX_WINDOW      = 2.0   # s — longest look-back (needed for slower)
 
     # Detection thresholds
-    T_CHORD_MCP        = 0.25   # m/s — mcp_speed_wr (palm pivot) floor for chords
-    T_CHORD_TIP_DISP   = 0.08   # m   — tip displacement range in wrist frame, floor for chords
-    T_RUN_TIP_ARTIC    = 0.15   # m/s — tip_artic floor for runs
+    T_CHORD_MCP        = 0.18   # m/s — mcp_speed_wr (palm pivot) floor for chords
+    T_CHORD_TIP_DISP   = 0.10   # m   — tip displacement range in wrist frame, floor for chords
+    T_RUN_TIP_ARTIC    = 0.07   # m/s — palm-normal projected tip_artic floor for runs
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
     T_ROTATE      = 1.0    # rad/s
     T_INDEX_EXT   = 0.80   # extension ratio — index counts as "extended"
@@ -45,12 +47,13 @@ class GestureDetector:
     T_FIST        = 0.58   # mean extension — hand counts as fist
     T_OPEN        = 0.70   # mean extension — hand counts as open
     T_FIST_HOLD   = 0.10   # s — must hold fist this long to confirm
-    T_INDEX_HOLD    = 0.333  # s — index must be extended this long to arm faster
-    T_INDEX_DROPOUT = 0.30   # s — tolerate brief dropouts in index-extended pose
-    T_INDEX_EXT     = 0.70   # lowered from 0.80 — recording shows idx_ext ~0.75-0.94
+    T_INDEX_HOLD      = 0.333  # s — full faster pose must be held to arm faster
+    T_INDEX_DROPOUT   = 0.30   # s — tolerate brief dropouts in index-extended pose
+    T_INDEX_EXT       = 0.70   # extension ratio — index counts as extended
+    T_INDEX_SUPPRESS  = 0.10   # s — suppress runs after index has been extended this long
 
     # Intensity normalisation
-    NORM_RUN    = 0.50   # m/s  — tip_artic at which run_intensity = 1.0
+    NORM_RUN    = 0.25   # m/s  — palm-normal projected tip_artic at which run_intensity = 1.0
     NORM_CHORD  = 0.50   # m/s  — mcp_speed_wr at which chord_intensity = 1.0
     NORM_ROTATE = 4.0    # rad/s
     REF_CLENCH  = 1.0    # s    — clench at this duration → slower_intensity = 1.0
@@ -136,7 +139,16 @@ class GestureDetector:
                         s.fist_pending = True
             # zone [T_FIST, T_OPEN]: transitional — maintain fist_start_t
 
-        # --- Faster: track index-extended hold with dropout tolerance ---
+        # --- Index extension tracker (runs suppression) ---
+        # Uses a higher threshold than the faster pose to avoid suppressing runs when
+        # the index naturally extends through its strike arc.
+        if ext[1] > 0.85:
+            if s.index_ext_since is None:
+                s.index_ext_since = t
+        else:
+            s.index_ext_since = None
+
+        # --- Faster: track full pose (index out + others curled) with dropout tolerance ---
         if index_ok:
             s.index_last_ok = t
             if s.index_since is None:
@@ -185,18 +197,29 @@ class GestureDetector:
         ts = np.array(times)
         dt = np.diff(ts)
 
-        # tip_artic — tips relative to their own MCPs (pure finger articulation)
-        tip_rel_mcp = h[:, TIPS] - h[:, MCPS]   # (N, 5, 3)
-        tip_artic = float(
-            np.linalg.norm(
-                np.diff(tip_rel_mcp, axis=0) / dt[:, None, None], axis=2
-            ).mean()
-        )
+        # tip_artic — velocity of tips relative to their own MCPs, projected onto the
+        # palm normal. This isolates finger-strike motion (perpendicular to palm) and
+        # rejects horizontal wrist translation, which has no palm-normal component.
+        tip_rel_mcp = h[:, TIPS] - h[:, MCPS]               # (N, 5, 3)
+        vel         = np.diff(tip_rel_mcp, axis=0) / dt[:, None, None]  # (N-1, 5, 3)
+        fa  = (h[:, 5] + h[:, 17]) * 0.5 - h[:, 0]
+        la  = h[:, 5] - h[:, 17]
+        fa  = fa / (np.linalg.norm(fa, axis=1, keepdims=True) + 1e-6)
+        la  = la / (np.linalg.norm(la, axis=1, keepdims=True) + 1e-6)
+        pn  = np.cross(fa, la)
+        pn  = pn / (np.linalg.norm(pn, axis=1, keepdims=True) + 1e-6)  # (N, 3)
+        pn_mid = pn[:-1]                                                 # (N-1, 3)
+        proj = (vel * pn_mid[:, None, :]).sum(axis=2)                   # (N-1, 5) signed
+        tip_artic = float(np.abs(proj).mean())
 
-        # tip_disp — peak-to-peak range of each tip in wrist frame, mean over fingers
-        tip_wr  = h[:, TIPS] - h[:, [0]]         # (N, 5, 3)
-        tip_range = tip_wr.max(axis=0) - tip_wr.min(axis=0)   # (5, 3)
-        tip_disp = float(np.linalg.norm(tip_range, axis=1).mean())
+        # tip_disp — peak-to-peak range of each tip projected onto the palm normal.
+        # Using the palm-normal projection discounts horizontal wrist motion so that
+        # only the arc perpendicular to the palm (the chord petting direction) counts.
+        tip_wr   = h[:, TIPS] - h[:, [0]]                        # (N, 5, 3)
+        pn_mean  = pn.mean(axis=0)                                # (3,) mean normal over window
+        pn_mean  = pn_mean / (np.linalg.norm(pn_mean) + 1e-6)
+        proj_pos = (tip_wr * pn_mean[None, None, :]).sum(axis=2)  # (N, 5) scalar projection
+        tip_disp = float((proj_pos.max(axis=0) - proj_pos.min(axis=0)).mean())
 
         # mcp_speed — palm centroid in wrist-relative frame (chord pivot signal)
         mcp_wr = h[:, MCPS4] - h[:, [0]]         # (N, 4, 3)
@@ -286,10 +309,13 @@ class GestureDetector:
                     if intensity > best_intensity:
                         best_mode, best_intensity = 'faster', intensity
 
-            # 3. Chords / Runs — skip if index is in extended-hold mode; the wrist
-            #    rotation during faster inherently elevates mcp_speed_wr.
+            # 3. Chords / Runs — skip if index has been extended long enough.
+            #    The full faster pose (index + others curled) suppresses via index_since;
+            #    index alone held > T_INDEX_SUPPRESS also suppresses runs specifically.
             if s.index_since is not None:
                 continue
+            index_suppressed = (s.index_ext_since is not None and
+                                now - s.index_ext_since >= self.T_INDEX_SUPPRESS)
 
             times, lms = self._hand_window(hi, 0.5)
             feat = self._motion_features(times, lms)
@@ -305,7 +331,8 @@ class GestureDetector:
                 intensity = float(np.clip(feat['mcp_speed'] / self.NORM_CHORD, 0.0, 1.0))
                 if intensity > best_intensity:
                     best_mode, best_intensity = 'chords', intensity
-            elif (feat['tip_artic'] >= self.T_RUN_TIP_ARTIC and
+            elif (not index_suppressed and
+                  feat['tip_artic'] >= self.T_RUN_TIP_ARTIC and
                   feat['ext_change'] >= self.T_RUN_EXT):
                 intensity = float(np.clip(feat['tip_artic'] / self.NORM_RUN, 0.0, 1.0))
                 if intensity > best_intensity:
