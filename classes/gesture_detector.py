@@ -55,7 +55,7 @@ class GestureDetector:
     # Intensity normalisation
     NORM_RUN    = 0.25   # m/s  — palm-normal projected tip_artic at which run_intensity = 1.0
     NORM_CHORD  = 0.50   # m/s  — mcp_speed_wr at which chord_intensity = 1.0
-    NORM_ROTATE = 4.0    # rad/s
+    NORM_ROTATE = 8.0    # rad/s — scaled up for index-tip angular velocity range
     REF_CLENCH  = 1.0    # s    — clench at this duration → slower_intensity = 1.0
 
     def __init__(self):
@@ -239,8 +239,12 @@ class GestureDetector:
         return {'tip_artic': tip_artic, 'tip_disp': tip_disp,
                 'mcp_speed': mcp_speed, 'ext_change': ext_change}
 
-    def _palm_angular_vel(self, times, lms):
-        """Mean |angular velocity of palm normal around forearm axis| in rad/s."""
+    def _rotation_angular_vel(self, times, lms):
+        """
+        Max of palm-normal and index-tip angular velocities around the forearm axis (rad/s).
+        Index tip has ~2-3x larger lever arm than palm normal, giving a stronger signal.
+        Taking the max means either signal alone is sufficient to detect the gesture.
+        """
         if len(times) < 2:
             return 0.0
         h  = np.stack(lms)
@@ -249,13 +253,25 @@ class GestureDetector:
 
         fa = (h[:, 5] + h[:, 17]) * 0.5 - h[:, 0]
         fa = fa / (np.linalg.norm(fa, axis=1, keepdims=True) + 1e-6)
+
+        # palm normal angular velocity
         la = h[:, 5] - h[:, 17]
         la = la / (np.linalg.norm(la, axis=1, keepdims=True) + 1e-6)
         pn = np.cross(fa, la)
         pn = pn / (np.linalg.norm(pn, axis=1, keepdims=True) + 1e-6)
+        palm_omega = np.abs(
+            (np.cross(pn[:-1], pn[1:]) * fa[:-1]).sum(axis=1) / (dt + 1e-6)
+        ).mean()
 
-        omega = (np.cross(pn[:-1], pn[1:]) * fa[:-1]).sum(axis=1) / (dt + 1e-6)
-        return float(np.abs(omega).mean())
+        # index tip angular velocity around forearm axis
+        tip_rel = h[:, 8] - h[:, 5]                                   # index tip rel to MCP
+        tip_perp = tip_rel - (tip_rel * fa).sum(axis=1, keepdims=True) * fa  # project out fa
+        tip_perp = tip_perp / (np.linalg.norm(tip_perp, axis=1, keepdims=True) + 1e-6)
+        index_omega = np.abs(
+            (np.cross(tip_perp[:-1], tip_perp[1:]) * fa[:-1]).sum(axis=1) / (dt + 1e-6)
+        ).mean()
+
+        return float(max(palm_omega, index_omega))
 
     # ------------------------------------------------------------------
     # Detection (called every REPORT_INTERVAL)
@@ -268,7 +284,7 @@ class GestureDetector:
             s = self._hand_states[hi]
             times, lms = self._hand_window(hi, 0.5)
             feat = self._motion_features(times, lms)
-            ang_vel = self._palm_angular_vel(times, lms) if len(times) >= 2 else 0.0
+            ang_vel = self._rotation_angular_vel(times, lms) if len(times) >= 2 else 0.0
             index_hold = (now - s.index_since) if s.index_since is not None else 0.0
             dbg.append({
                 'tip_artic':      feat['tip_artic']  if feat else None,
@@ -303,7 +319,7 @@ class GestureDetector:
             # 2. Faster — index held long enough + rotation rate
             if s.index_since is not None and now - s.index_since >= self.T_INDEX_HOLD:
                 times, lms = self._hand_window(hi, 0.5)
-                av = self._palm_angular_vel(times, lms)
+                av = self._rotation_angular_vel(times, lms)
                 if av >= self.T_ROTATE:
                     intensity = float(np.clip(av / self.NORM_ROTATE, 0.0, 1.0))
                     if intensity > best_intensity:
