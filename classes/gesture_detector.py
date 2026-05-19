@@ -249,6 +249,7 @@ class GestureDetector:
             index_hold = (now - s.index_since) if s.index_since is not None else 0.0
             dbg.append({
                 'tip_artic':      feat['tip_artic']  if feat else None,
+                'tip_disp':       feat['tip_disp']   if feat else None,
                 'mcp_speed':      feat['mcp_speed']  if feat else None,
                 'ext_change':     feat['ext_change'] if feat else None,
                 'ang_vel':        ang_vel,

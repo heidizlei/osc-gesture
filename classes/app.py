@@ -139,10 +139,12 @@ class OSCGestureApp:
 
             # tip_artic — used by both run and chord rules
             ta_ok_run   = ta  >= det.T_RUN_TIP_ARTIC
-            ta_ok_chord = ta  >= det.T_CHORD_TIP_ARTIC
-            _put(f"  tip_artic  {ta:.3f}"  +
-                 f"  run>={det.T_RUN_TIP_ARTIC}"  + (" Y" if ta_ok_run   else " N") +
-                 f"  chord>={det.T_CHORD_TIP_ARTIC}" + (" Y" if ta_ok_chord else " N"),
+            td  = sc.get('tip_disp', 0.0)
+            ta_ok_chord = td  >= det.T_CHORD_TIP_DISP
+            _put(f"  tip_artic  {ta:.3f}  run>={det.T_RUN_TIP_ARTIC}" +
+                 (" Y" if ta_ok_run else " N") +
+                 f"  tip_disp {td:.3f}  chord>={det.T_CHORD_TIP_DISP}" +
+                 (" Y" if ta_ok_chord else " N"),
                  OK if ta_ok_chord else (OK if ta_ok_run else FAIL))
 
             # mcp_speed — chord rule only
