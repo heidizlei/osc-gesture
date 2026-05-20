@@ -318,16 +318,19 @@ class GestureDetector:
             feat = self._motion_features(times, lms)
             ang_vel = self._rotation_angular_vel(times, lms) if len(times) >= 2 else 0.0
             index_hold = (now - s.index_since) if s.index_since is not None else 0.0
+            ext_frame = self._extension(lms[-1]) if lms else None
             dbg.append({
-                'tip_artic':      feat['tip_artic']  if feat else None,
-                'tip_disp':       feat['tip_disp']   if feat else None,
-                'mcp_speed':      feat['mcp_speed']  if feat else None,
-                'ext_change':     feat['ext_change'] if feat else None,
-                'ang_vel':        ang_vel,
-                'index_hold':     index_hold,
-                'mean_ext':       s.mean_ext,
-                'fist_pending':   s.fist_pending,
-                'fist_intensity': s.fist_intensity,
+                'tip_artic':       feat['tip_artic']  if feat else None,
+                'tip_disp':        feat['tip_disp']   if feat else None,
+                'ext_change':      feat['ext_change'] if feat else None,
+                'ang_vel':         ang_vel,
+                'index_hold':      index_hold,
+                'index_ext_since': s.index_ext_since,
+                'index_ext':       float(ext_frame[1]) if ext_frame is not None else 0.0,
+                'others_curl_max': float(ext_frame[2:5].max()) if ext_frame is not None else 0.0,
+                'mean_ext':        s.mean_ext,
+                'fist_pending':    s.fist_pending,
+                'fist_intensity':  s.fist_intensity,
                 'is_chord': bool(feat and feat['tip_disp'] >= self.T_CHORD_TIP_DISP),
                 'is_run':   bool(feat and
                                  feat['tip_artic']  >= self.T_RUN_TIP_ARTIC and
