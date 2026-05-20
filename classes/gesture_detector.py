@@ -53,8 +53,8 @@ class GestureDetector:
     T_INDEX_SUPPRESS  = 0.10   # s — suppress runs after index has been extended this long
 
     # Intensity normalisation
-    NORM_RUN    = 0.25   # m/s  — palm-normal projected tip_artic at which run_intensity = 1.0
-    NORM_CHORD  = 0.50   # m/s  — mcp_speed_wr at which chord_intensity = 1.0
+    NORM_RUN         = 0.25   # m/s — palm-normal projected tip_artic at which run_intensity = 1.0
+    NORM_CHORD_FREQ  = 4.0    # Hz  — petting frequency at which chord_intensity = 1.0
     NORM_ROTATE = 8.0    # rad/s — scaled up for index-tip angular velocity range
     REF_CLENCH  = 1.0    # s    — clench at this duration → slower_intensity = 1.0
 
@@ -273,6 +273,39 @@ class GestureDetector:
 
         return float(max(palm_omega, index_omega))
 
+    def _chord_frequency(self, times, lms):
+        """
+        Estimate petting frequency (Hz) from zero-crossings of MCP centroid
+        velocity projected onto the palm normal. Uses a 1s look-back window.
+        Returns 0.0 if fewer than 2 crossings are found.
+        """
+        if len(times) < 3:
+            return 0.0
+        h  = np.stack(lms)
+        ts = np.array(times)
+        dt = np.diff(ts)
+
+        fa = (h[:, 5] + h[:, 17]) * 0.5 - h[:, 0]
+        fa = fa / (np.linalg.norm(fa, axis=1, keepdims=True) + 1e-6)
+        la = h[:, 5] - h[:, 17]
+        la = la / (np.linalg.norm(la, axis=1, keepdims=True) + 1e-6)
+        pn = np.cross(fa, la)
+        pn = pn / (np.linalg.norm(pn, axis=1, keepdims=True) + 1e-6)
+        pn_mean = pn.mean(axis=0)
+        pn_mean = pn_mean / (np.linalg.norm(pn_mean) + 1e-6)
+
+        mcp_wr  = h[:, MCPS4] - h[:, [0]]
+        mcp_vel = np.diff(mcp_wr.mean(axis=1), axis=0) / dt[:, None]  # (N-1, 3)
+        signed  = (mcp_vel * pn_mean).sum(axis=1)                      # (N-1,) signed
+
+        signs = np.sign(signed)
+        signs[signs == 0] = 1
+        crossings = np.where(np.diff(signs) != 0)[0]
+        if len(crossings) < 2:
+            return 0.0
+        half_periods = np.diff(ts[1:][crossings])
+        return float(1.0 / (2.0 * half_periods.mean() + 1e-6))
+
     # ------------------------------------------------------------------
     # Detection (called every REPORT_INTERVAL)
     # ------------------------------------------------------------------
@@ -344,7 +377,14 @@ class GestureDetector:
             is_chord = (feat['mcp_speed'] >= self.T_CHORD_MCP and
                         feat['tip_disp']  >= self.T_CHORD_TIP_DISP)
             if is_chord:
-                intensity = float(np.clip(feat['mcp_speed'] / self.NORM_CHORD, 0.0, 1.0))
+                # Intensity from petting frequency over 1s look-back window.
+                # Fall back to a fixed mid-range value if not enough crossings yet.
+                freq_times, freq_lms = self._hand_window(hi, 1.0)
+                freq = self._chord_frequency(freq_times, freq_lms)
+                if freq > 0:
+                    intensity = float(np.clip(freq / self.NORM_CHORD_FREQ, 0.0, 1.0))
+                else:
+                    intensity = 0.5
                 if intensity > best_intensity:
                     best_mode, best_intensity = 'chords', intensity
             elif (not index_suppressed and
