@@ -42,7 +42,7 @@ class GestureDetector:
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
     T_ROTATE      = 1.0    # rad/s
     T_INDEX_EXT   = 0.80   # extension ratio — index counts as "extended"
-    T_OTHERS_CURL = 0.55   # extension ratio — other fingers must be below this
+    T_OTHERS_CURL = 0.90   # extension ratio — middle/ring/pinky must be below this for faster pose
     T_FIST        = 0.58   # mean extension — hand counts as fist
     T_OPEN        = 0.70   # mean extension — hand counts as open
     T_FIST_HOLD   = 0.10   # s — must hold fist this long to confirm
