@@ -55,7 +55,8 @@ class GestureDetector:
     NORM_RUN         = 0.25   # m/s — palm-normal projected tip_artic at which run_intensity = 1.0
     NORM_CHORD_FREQ  = 4.0    # Hz  — petting frequency at which chord_intensity = 1.0
     NORM_ROTATE = 8.0    # rad/s — scaled up for index-tip angular velocity range
-    REF_CLENCH  = 1.0    # s    — clench at this duration → slower_intensity = 1.0
+    MIN_CLENCH  = 0.10   # s    — fastest clench → intensity = 1.0
+    MAX_CLENCH  = 0.60   # s    — slowest clench → intensity = 0.0 (observed range 0.07–0.58s)
 
     def __init__(self):
         self._buf         = []                              # [(t, wl_2x21x3), ...]
@@ -134,7 +135,10 @@ class GestureDetector:
                 elif not s.fist_pending and (t - s.fist_start_t >= self.T_FIST_HOLD):
                     if s.t_open is not None:
                         dur = max(s.fist_start_t - s.t_open, 0.05)
-                        s.fist_intensity = float(np.clip(self.REF_CLENCH / dur, 0.0, 1.0))
+                        # Fast clench (short duration) → high intensity; slow → low
+                        s.fist_intensity = float(np.clip(
+                            1.0 - (dur - self.MIN_CLENCH) / (self.MAX_CLENCH - self.MIN_CLENCH),
+                            0.0, 1.0))
                         s.fist_pending = True
             # zone [T_FIST, T_OPEN]: transitional — maintain fist_start_t
 
