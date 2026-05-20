@@ -37,7 +37,6 @@ class GestureDetector:
     MAX_WINDOW      = 2.0   # s — longest look-back (needed for slower)
 
     # Detection thresholds
-    T_CHORD_MCP        = 0.18   # m/s — mcp_speed_wr (palm pivot) floor for chords
     T_CHORD_TIP_DISP   = 0.07   # m   — tip displacement range in wrist frame, floor for chords
     T_RUN_TIP_ARTIC    = 0.07   # m/s — palm-normal projected tip_artic floor for runs
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
@@ -329,9 +328,7 @@ class GestureDetector:
                 'mean_ext':       s.mean_ext,
                 'fist_pending':   s.fist_pending,
                 'fist_intensity': s.fist_intensity,
-                'is_chord': bool(feat and
-                                 feat['mcp_speed'] >= self.T_CHORD_MCP and
-                                 feat['tip_disp']  >= self.T_CHORD_TIP_DISP),
+                'is_chord': bool(feat and feat['tip_disp'] >= self.T_CHORD_TIP_DISP),
                 'is_run':   bool(feat and
                                  feat['tip_artic']  >= self.T_RUN_TIP_ARTIC and
                                  feat['ext_change'] >= self.T_RUN_EXT),
@@ -371,11 +368,9 @@ class GestureDetector:
             if feat is None:
                 continue
 
-            # Chord: palm pivots (mcp_speed) AND tips sweep a large arc relative to wrist
-            # (tip_disp). Runs make short local finger strokes — small tip_disp even when
-            # the overall hand moves.
-            is_chord = (feat['mcp_speed'] >= self.T_CHORD_MCP and
-                        feat['tip_disp']  >= self.T_CHORD_TIP_DISP)
+            # Chord: tips sweep a large arc relative to the wrist (tip_disp).
+            # Runs make short local finger strokes — small tip_disp even when the hand moves.
+            is_chord = feat['tip_disp'] >= self.T_CHORD_TIP_DISP
             if is_chord:
                 # Intensity from petting frequency over 1s look-back window.
                 # Fall back to a fixed mid-range value if not enough crossings yet.
