@@ -135,9 +135,9 @@ class GestureDetector:
                 elif not s.fist_pending and (t - s.fist_start_t >= self.T_FIST_HOLD):
                     if s.t_open is not None:
                         dur = max(s.fist_start_t - s.t_open, 0.05)
-                        # Fast clench (short duration) → high intensity; slow → low
+                        # Slow clench (long duration) → high intensity; fast → low
                         s.fist_intensity = float(np.clip(
-                            1.0 - (dur - self.MIN_CLENCH) / (self.MAX_CLENCH - self.MIN_CLENCH),
+                            (dur - self.MIN_CLENCH) / (self.MAX_CLENCH - self.MIN_CLENCH),
                             0.0, 1.0))
                         s.fist_pending = True
             # zone [T_FIST, T_OPEN]: transitional — maintain fist_start_t
