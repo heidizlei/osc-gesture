@@ -62,6 +62,9 @@ class GestureDetector:
     MIN_CLENCH  = 0.10   # s    — fastest clench → intensity = 1.0
     MAX_CLENCH  = 0.60   # s    — slowest clench → intensity = 0.0 (observed range 0.07–0.58s)
 
+    # Vertical movement suppression (image-space wrist y, [0,1] normalised screen)
+    T_VERTICAL_VEL = 0.40  # screen-heights/s — force noop above this wrist vertical speed
+
     # Hysteresis
     NOOP_DEAD_TIME = 0.30  # s — hold last active mode this long before dropping to noop
     SWITCH_HOLD    = 0.50  # s — new mode must be consistently detected this long before
@@ -84,14 +87,16 @@ class GestureDetector:
     # Public interface
     # ------------------------------------------------------------------
 
-    def update(self, world_landmarks, t):
+    def update(self, world_landmarks, t, wrist_y=None):
         """
         world_landmarks : np.ndarray (2, 21, 3), float32, NaN for missing hands
         t               : float, seconds since some fixed epoch (e.g. time.time())
+        wrist_y         : np.ndarray (2,) normalised image-space wrist y [0,1], NaN if missing
         Returns (mode: str, intensity: float in [0, 1]).
         Mode is refreshed every REPORT_INTERVAL seconds.
         """
-        self._buf.append((t, world_landmarks.copy()))
+        self._buf.append((t, world_landmarks.copy(),
+                          wrist_y.copy() if wrist_y is not None else np.full(2, np.nan)))
         cutoff = t - self.MAX_WINDOW
         while len(self._buf) > 1 and self._buf[0][0] < cutoff:
             self._buf.pop(0)
@@ -193,7 +198,7 @@ class GestureDetector:
         t_now  = self._buf[-1][0]
         cutoff = t_now - window_s
         times, lms = [], []
-        for t, wl in self._buf:
+        for t, wl, *_ in self._buf:
             if t < cutoff:
                 continue
             h = wl[hi]
@@ -335,7 +340,45 @@ class GestureDetector:
     # Detection (called every REPORT_INTERVAL)
     # ------------------------------------------------------------------
 
+    def _wrist_vertical_vel(self):
+        """Max |dy/dt| of wrist in image-space across both hands (screen-heights/s)."""
+        if len(self._buf) < 2:
+            return 0.0
+        # Use last 500ms of image-space wrist y values
+        t_now  = self._buf[-1][0]
+        cutoff = t_now - 0.5
+        ts, ys = [], [[], []]
+        for t, _, wy in self._buf:
+            if t < cutoff:
+                continue
+            ts.append(t)
+            for hi in range(2):
+                ys[hi].append(float(wy[hi]))
+        if len(ts) < 2:
+            return 0.0
+        dt  = np.diff(ts)
+        max_vel = 0.0
+        for hi in range(2):
+            y_arr = np.array(ys[hi])
+            valid = ~np.isnan(y_arr)
+            if valid.sum() < 2:
+                continue
+            # only compute velocity for consecutive valid frames
+            dy  = np.diff(y_arr)
+            vel = np.abs(dy) / (dt + 1e-6)
+            # mask pairs where either frame is nan
+            pair_valid = valid[:-1] & valid[1:]
+            if pair_valid.any():
+                max_vel = max(max_vel, float(vel[pair_valid].mean()))
+        return max_vel
+
     def _detect(self, now):
+        # Vertical movement gate: force noop if wrist is translating vertically too fast
+        if self._wrist_vertical_vel() > self.T_VERTICAL_VEL:
+            self._active_mode = 'noop'
+            self._pending_mode = 'noop'
+            return ('noop', 0.0)
+
         # Build per-hand debug snapshot before the main detection loop
         dbg = []
         for hi in range(2):

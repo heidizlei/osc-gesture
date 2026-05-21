@@ -77,6 +77,14 @@ class OSCGestureApp:
                     wl[i, j] = (lm.x, lm.y, lm.z)
         return wl
 
+    def _extract_wrist_img(self, results):
+        """Wrist y position per hand in normalised image coords [0,1], NaN if missing."""
+        wy = np.full(2, np.nan, dtype=np.float32)
+        if results and results.hand_landmarks:
+            for i, hand in enumerate(results.hand_landmarks[:2]):
+                wy[i] = hand[0].y   # landmark 0 = wrist, y = vertical screen position
+        return wy
+
     def _draw_gesture_hud(self, frame, mode, intensity):
         color = _MODE_COLORS.get(mode, (160, 160, 160))
         label = f"{mode}  {intensity:.2f}"
@@ -271,7 +279,8 @@ class OSCGestureApp:
 
                 # Gesture detection (runs every frame, reports every 500 ms)
                 wl = self._extract_world_landmarks(results)
-                self.gesture_result = self.gesture_detector.update(wl, time.time())
+                wy = self._extract_wrist_img(results)
+                self.gesture_result = self.gesture_detector.update(wl, time.time(), wrist_y=wy)
 
                 # Send pause/unpause only when state changes
                 if self.hand_present != self.last_hand_present:
