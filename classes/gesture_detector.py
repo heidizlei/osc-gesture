@@ -40,6 +40,7 @@ class GestureDetector:
     T_CHORD_MCP        = 0.10   # m/s — mcp_speed_wr floor for chords; filters rigid wrist
                            #     translation (no palm pivot → near-zero mcp_speed)
     T_CHORD_TIP_DISP   = 0.07   # m   — tip displacement range in wrist frame, floor for chords
+    T_RUN_OPEN         = 0.65   # mean extension — hand must be this open for runs to fire
     T_RUN_TIP_ARTIC    = 0.07   # m/s — palm-normal projected tip_artic floor for runs
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
     T_ROTATE      = 1.0    # rad/s
@@ -419,6 +420,7 @@ class GestureDetector:
                 if intensity > best_intensity:
                     best_mode, best_intensity = 'chords', intensity
             elif (not index_suppressed and
+                  s.mean_ext >= self.T_RUN_OPEN and
                   feat['tip_artic'] >= self.T_RUN_TIP_ARTIC and
                   feat['ext_change'] >= self.T_RUN_EXT):
                 intensity = float(np.clip(feat['tip_artic'] / self.NORM_RUN, 0.0, 1.0))
