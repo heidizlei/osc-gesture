@@ -42,7 +42,8 @@ class GestureDetector:
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
     T_ROTATE      = 1.0    # rad/s
     T_INDEX_EXT   = 0.80   # extension ratio — index counts as "extended"
-    T_OTHERS_CURL = 0.90   # extension ratio — middle/ring/pinky must be below this for faster pose
+    T_OTHERS_DIST = 0.11   # m — max tip-to-wrist distance for middle/ring/pinky (curled = near wrist)
+                           #     faster: ~0.07-0.09m (curled), runs: ~0.13-0.17m (extended)
     T_FIST        = 0.58   # mean extension — hand counts as fist
     T_OPEN        = 0.70   # mean extension — hand counts as open
     T_FIST_HOLD   = 0.10   # s — must hold fist this long to confirm
@@ -133,10 +134,12 @@ class GestureDetector:
         me  = float(ext.mean())
         s.mean_ext = me
 
-        index_ok = (ext[1] > self.T_INDEX_EXT and
-                    ext[2] < self.T_OTHERS_CURL and
-                    ext[3] < self.T_OTHERS_CURL and
-                    ext[4] < self.T_OTHERS_CURL)
+        # Tip-to-wrist distance for middle/ring/pinky — more reliable than extension
+        # ratio for detecting curled fingers (extension ratio inflates >1 for mid/ring)
+        others_dist_ok = (np.linalg.norm(h[12] - h[0]) < self.T_OTHERS_DIST and
+                          np.linalg.norm(h[16] - h[0]) < self.T_OTHERS_DIST and
+                          np.linalg.norm(h[20] - h[0]) < self.T_OTHERS_DIST)
+        index_ok = ext[1] > self.T_INDEX_EXT and others_dist_ok
 
         # --- Slower state machine (hysteresis: only resets on full open) ---
         # Skip when index is extended — the two gestures are physically exclusive.
@@ -347,7 +350,11 @@ class GestureDetector:
                 'index_hold':      index_hold,
                 'index_ext_since': s.index_ext_since,
                 'index_ext':       float(ext_frame[1]) if ext_frame is not None else 0.0,
-                'others_curl_max': float(ext_frame[2:5].max()) if ext_frame is not None else 0.0,
+                'others_dist_max': float(max(
+                    np.linalg.norm(lms[-1][12] - lms[-1][0]),
+                    np.linalg.norm(lms[-1][16] - lms[-1][0]),
+                    np.linalg.norm(lms[-1][20] - lms[-1][0]),
+                )) if lms else 0.0,
                 'mean_ext':        s.mean_ext,
                 'fist_pending':    s.fist_pending,
                 'fist_intensity':  s.fist_intensity,

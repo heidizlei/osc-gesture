@@ -150,15 +150,15 @@ class OSCGestureApp:
 
             # --- Faster ---
             idx_ext      = sc['index_ext']
-            others_max   = sc['others_curl_max']
+            others_dist  = sc['others_dist_max']
             idx_hold     = sc['index_hold']
-            idx_ext_ok   = idx_ext    >= det.T_INDEX_EXT
-            others_ok    = others_max <  det.T_OTHERS_CURL
-            hold_ok      = idx_hold   >= det.T_INDEX_HOLD
-            av_ok        = av         >= det.T_ROTATE
+            idx_ext_ok   = idx_ext   >= det.T_INDEX_EXT
+            others_ok    = others_dist < det.T_OTHERS_DIST
+            hold_ok      = idx_hold  >= det.T_INDEX_HOLD
+            av_ok        = av        >= det.T_ROTATE
             faster_armed = idx_ext_ok and others_ok and hold_ok
             _put(f"  idx_ext {idx_ext:.2f}>={det.T_INDEX_EXT}{'Y' if idx_ext_ok else 'N'}"
-                 f"  others {others_max:.2f}<{det.T_OTHERS_CURL}{'Y' if others_ok else 'N'}"
+                 f"  others_d {others_dist:.3f}<{det.T_OTHERS_DIST}{'Y' if others_ok else 'N'}"
                  f"  hold {idx_hold:.2f}s>={det.T_INDEX_HOLD}{'Y' if hold_ok else 'N'}",
                  OK if faster_armed else (FAIL if not idx_ext_ok else INFO))
             _put(f"  ang_vel {av:.2f}>={det.T_ROTATE}{'Y' if av_ok else 'N'}"
