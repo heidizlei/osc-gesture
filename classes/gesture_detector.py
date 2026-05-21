@@ -39,7 +39,7 @@ class GestureDetector:
     # Detection thresholds
     T_CHORD_MCP        = 0.10   # m/s — mcp_speed_wr floor for chords; filters rigid wrist
                            #     translation (no palm pivot → near-zero mcp_speed)
-    T_CHORD_TIP_DISP   = 0.07   # m   — tip displacement range in wrist frame, floor for chords
+    T_CHORD_TIP_DISP   = 0.08   # m   — tip displacement range in wrist frame, floor for chords
     T_RUN_OPEN         = 0.65   # mean extension — hand must be this open for runs to fire
     T_RUN_TIP_ARTIC    = 0.07   # m/s — palm-normal projected tip_artic floor for runs
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
