@@ -58,12 +58,23 @@ class GestureDetector:
     MIN_CLENCH  = 0.10   # s    — fastest clench → intensity = 1.0
     MAX_CLENCH  = 0.60   # s    — slowest clench → intensity = 0.0 (observed range 0.07–0.58s)
 
+    # Hysteresis
+    NOOP_DEAD_TIME = 0.30  # s — hold last active mode this long before dropping to noop
+    SWITCH_HOLD    = 0.50  # s — new mode must be consistently detected this long before
+                           #     switching away from an existing active mode
+
     def __init__(self):
         self._buf         = []                              # [(t, wl_2x21x3), ...]
         self._hand_states = [_HandState(), _HandState()]
         self._last_report = 0.0
         self._result      = ('noop', 0.0)
         self.debug_scores = [{}, {}]                        # populated each _detect() call
+        # Hysteresis state
+        self._active_mode    = 'noop'     # currently committed mode
+        self._last_active_t  = 0.0        # last time a non-noop mode was returned
+        self._last_active_result = ('noop', 0.0)
+        self._pending_mode   = 'noop'     # candidate mode being evaluated for switch
+        self._pending_since  = 0.0        # when pending mode first appeared
 
     # ------------------------------------------------------------------
     # Public interface
@@ -94,9 +105,14 @@ class GestureDetector:
 
     def reset(self):
         self._buf.clear()
-        self._hand_states = [_HandState(), _HandState()]
-        self._last_report = 0.0
-        self._result = ('noop', 0.0)
+        self._hand_states       = [_HandState(), _HandState()]
+        self._last_report       = 0.0
+        self._result            = ('noop', 0.0)
+        self._active_mode       = 'noop'
+        self._last_active_t     = 0.0
+        self._last_active_result = ('noop', 0.0)
+        self._pending_mode      = 'noop'
+        self._pending_since     = 0.0
 
     # ------------------------------------------------------------------
     # Per-frame state machine
@@ -396,7 +412,45 @@ class GestureDetector:
                 if intensity > best_intensity:
                     best_mode, best_intensity = 'runs', intensity
 
-        return best_mode, best_intensity
+        # --- Hysteresis ---
+        now = self._buf[-1][0] if self._buf else 0.0
+
+        # (1) Mode-switch hold: when already in an active mode, a different mode must
+        #     be consistently detected for SWITCH_HOLD seconds before committing to it.
+        #     Faster/slower are one-shot events and always pass through immediately.
+        if best_mode in ('faster', 'slower'):
+            self._active_mode   = best_mode
+            self._pending_mode  = best_mode
+            self._pending_since = now
+        elif self._active_mode == 'noop':
+            # No active mode — commit immediately (no hold needed for first detection)
+            self._active_mode   = best_mode
+            self._pending_mode  = best_mode
+            self._pending_since = now
+        elif best_mode == self._active_mode:
+            # Continuing same mode — reset pending
+            self._pending_mode  = best_mode
+            self._pending_since = now
+        else:
+            # Candidate switch: track how long this new mode has been dominant
+            if best_mode != self._pending_mode:
+                self._pending_mode  = best_mode
+                self._pending_since = now
+            elif now - self._pending_since >= self.SWITCH_HOLD:
+                self._active_mode = best_mode
+
+        committed_mode      = self._active_mode
+        committed_intensity = best_intensity if committed_mode == best_mode else self._last_active_result[1]
+
+        # (3) Noop dead-time: hold the last active mode briefly after signal drops.
+        if committed_mode == 'noop' and now - self._last_active_t < self.NOOP_DEAD_TIME:
+            return self._last_active_result
+
+        if committed_mode != 'noop':
+            self._last_active_t      = now
+            self._last_active_result = (committed_mode, committed_intensity)
+
+        return committed_mode, committed_intensity
 
 
 # ------------------------------------------------------------------
