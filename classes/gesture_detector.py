@@ -45,15 +45,14 @@ class GestureDetector:
     T_RUN_TIP_ARTIC         = 0.07   # m/s — tip_artic floor for runs (also when coming from chords)
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
     T_ROTATE      = 1.0    # rad/s
-    T_INDEX_EXT   = 0.80   # extension ratio — index counts as "extended"
-    T_OTHERS_DIST = 0.11   # m — max tip-to-wrist distance for middle/ring/pinky (curled = near wrist)
-                           #     faster: ~0.07-0.09m (curled), runs: ~0.13-0.17m (extended)
+    T_INDEX_EXT       = 0.60   # extension ratio — index counts as extended (lowered for new angle)
+    T_OTHERS_DIST_RATIO = 1.0  # max (others_tip_dist / hand_size) — normalised, camera-angle independent
+                               # faster (curled): p90=0.96; noop/runs (extended): p10=1.24
     T_FIST        = 0.50   # mean extension — hand counts as fist (requires tighter clench)
     T_OPEN        = 0.70   # mean extension — hand counts as open
     T_FIST_HOLD   = 0.10   # s — must hold fist this long to confirm
     T_INDEX_HOLD      = 0.333  # s — full faster pose must be held to arm faster
     T_INDEX_DROPOUT   = 0.30   # s — tolerate brief dropouts in index-extended pose
-    T_INDEX_EXT       = 0.70   # extension ratio — index counts as extended
     T_INDEX_SUPPRESS  = 0.10   # s — suppress runs after index has been extended this long
 
     # Intensity normalisation
@@ -143,11 +142,12 @@ class GestureDetector:
         me  = float(ext.mean())
         s.mean_ext = me
 
-        # Tip-to-wrist distance for middle/ring/pinky — more reliable than extension
-        # ratio for detecting curled fingers (extension ratio inflates >1 for mid/ring)
-        others_dist_ok = (np.linalg.norm(h[12] - h[0]) < self.T_OTHERS_DIST and
-                          np.linalg.norm(h[16] - h[0]) < self.T_OTHERS_DIST and
-                          np.linalg.norm(h[20] - h[0]) < self.T_OTHERS_DIST)
+        # Normalised tip-to-wrist for middle/ring/pinky: ratio vs hand size is
+        # camera-angle independent (absolute distances vary with camera angle).
+        hand_size = float(np.linalg.norm(h[MCPS4] - h[[0]], axis=1).mean())
+        others_dist_ok = (np.linalg.norm(h[12] - h[0]) / (hand_size + 1e-6) < self.T_OTHERS_DIST_RATIO and
+                          np.linalg.norm(h[16] - h[0]) / (hand_size + 1e-6) < self.T_OTHERS_DIST_RATIO and
+                          np.linalg.norm(h[20] - h[0]) / (hand_size + 1e-6) < self.T_OTHERS_DIST_RATIO)
         index_ok = ext[1] > self.T_INDEX_EXT and others_dist_ok
 
         # --- Slower state machine (hysteresis: only resets on full open) ---
@@ -402,7 +402,8 @@ class GestureDetector:
                     np.linalg.norm(lms[-1][12] - lms[-1][0]),
                     np.linalg.norm(lms[-1][16] - lms[-1][0]),
                     np.linalg.norm(lms[-1][20] - lms[-1][0]),
-                )) if lms else 0.0,
+                ) / (float(np.linalg.norm(lms[-1][MCPS4] - lms[-1][[0]], axis=1).mean()) + 1e-6)
+                ) if lms else 0.0,
                 'mean_ext':        s.mean_ext,
                 'fist_pending':    s.fist_pending,
                 'fist_intensity':  s.fist_intensity,
