@@ -152,6 +152,8 @@ class GestureSender:
         if self._last_sent_mode in ('runs', 'chords'):
             self._send(osc_client, '/resetControl', [])
         self._send(osc_client, '/adjustTempo', [ratio])
+        # Clear last sent level so chords/runs re-send unconditionally after tempo
+        self._last_sent_level = None
 
     def _send(self, osc_client, address, args):
         try:
