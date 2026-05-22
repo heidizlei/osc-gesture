@@ -170,49 +170,64 @@ class OSCGestureApp:
                 _put("  (no data)", DIM)
                 continue
 
-            ta  = sc['tip_artic']
-            td  = sc['tip_disp']
-            ext = sc['ext_change']
-            av  = sc['ang_vel']
-            idx = sc['index_ext']
-            od  = sc['others_dist_max']
-            ih  = sc['index_hold']
-            me  = sc['mean_ext']
-            fp  = sc['fist_pending']
-            fi  = sc['fist_intensity']
+            ta   = sc['tip_artic']
+            td   = sc['tip_disp']
+            mcp  = sc['mcp_speed']
+            ext  = sc['ext_change']
+            av   = sc['ang_vel']
+            idx  = sc['index_ext']
+            od   = sc['others_dist_max']
+            ih   = sc['index_hold']
+            me   = sc['mean_ext']
+            oe   = sc['open_ext']        # baseline for relative fist
+            fp   = sc['fist_pending']
+            fi   = sc['fist_intensity']
+            isup = sc['index_suppressed']
+            dthr = sc['disp_thr']        # context-sensitive chord threshold
 
-            # --- Runs / Chords ---
-            ta_ok = ta >= det.T_RUN_TIP_ARTIC
-            td_ok = td >= det.T_CHORD_TIP_DISP
-            ec_ok = ext >= det.T_RUN_EXT
-            is_chord = sc['is_chord']
-            is_run   = sc['is_run']
+            # --- Runs ---
+            ta_ok   = ta  >= det.T_RUN_TIP_ARTIC
+            ec_ok   = ext >= det.T_RUN_EXT
+            me_ok   = me  >= det.T_RUN_OPEN
+            is_run  = sc['is_run']
             _put(f"  tip_artic {ta:.3f}>={det.T_RUN_TIP_ARTIC}{'Y' if ta_ok else 'N'}"
-                 f"  ext_chg {ext:.2f}>={det.T_RUN_EXT}{'Y' if ec_ok else 'N'}",
+                 f"  ext_chg {ext:.2f}>={det.T_RUN_EXT}{'Y' if ec_ok else 'N'}"
+                 f"  me {me:.2f}>={det.T_RUN_OPEN}{'Y' if me_ok else 'N'}"
+                 f"  sup={'Y' if isup else 'N'}"
+                 f"  → {'RUN' if is_run else 'run'}",
                  OK if is_run else (INFO if ta_ok else FAIL))
-            _put(f"  tip_disp {td:.3f}>={det.T_CHORD_TIP_DISP}{'Y' if td_ok else 'N'}"
-                 f"  → {'CHORD' if is_chord else 'chord'}  {'RUN' if is_run else 'run'}",
-                 OK if (is_chord or is_run) else DIM)
+
+            # --- Chords ---
+            td_ok   = td  >= dthr
+            mcp_ok  = mcp >= det.T_CHORD_MCP if mcp is not None else False
+            is_chord = sc['is_chord']
+            thr_label = f"{dthr:.2f}{'*' if dthr == det.T_CHORD_TIP_DISP_IN_RUNS else ''}"
+            _put(f"  tip_disp {td:.3f}>={thr_label}{'Y' if td_ok else 'N'}"
+                 f"  mcp {mcp:.3f}>={det.T_CHORD_MCP}{'Y' if mcp_ok else 'N'}"
+                 f"  → {'CHORD' if is_chord else 'chord'}",
+                 OK if is_chord else (INFO if td_ok else FAIL))
 
             # --- Faster ---
-            idx_ok   = idx >= det.T_INDEX_EXT
-            od_ok    = od  <  det.T_OTHERS_DIST_RATIO
-            hold_ok  = ih  >= det.T_INDEX_HOLD
-            av_ok    = av  >= det.T_ROTATE
-            f_armed  = idx_ok and od_ok and hold_ok
+            idx_ok  = idx >= det.T_INDEX_EXT
+            od_ok   = od  <  det.T_OTHERS_DIST_RATIO
+            hold_ok = ih  >= det.T_INDEX_HOLD
+            av_ok   = av  >= det.T_ROTATE
+            f_armed = idx_ok and od_ok and hold_ok
             _put(f"  idx {idx:.2f}>={det.T_INDEX_EXT}{'Y' if idx_ok else 'N'}"
                  f"  od {od:.2f}<{det.T_OTHERS_DIST_RATIO}{'Y' if od_ok else 'N'}"
-                 f"  hold {ih:.2f}s>={det.T_INDEX_HOLD}{'Y' if hold_ok else 'N'}",
-                 OK if f_armed else (INFO if (idx_ok and od_ok) else FAIL))
-            _put(f"  ang_vel {av:.2f}>={det.T_ROTATE}{'Y' if av_ok else 'N'}"
+                 f"  hold {ih:.2f}s>={det.T_INDEX_HOLD}{'Y' if hold_ok else 'N'}"
+                 f"  av {av:.1f}>={det.T_ROTATE}{'Y' if av_ok else 'N'}"
                  f"  → {'FASTER' if (f_armed and av_ok) else 'faster'}",
-                 OK if (f_armed and av_ok) else (INFO if f_armed else DIM))
+                 OK if (f_armed and av_ok) else (INFO if f_armed else FAIL))
 
             # --- Slower ---
-            me_open = me > det.T_OPEN
-            _put(f"  mean_ext {me:.2f}  {'>OPEN' if me_open else 'mid'}"
-                 f"  fist={'PENDING' if fp else f'int={fi:.2f}'}",
-                 OK if fp else (INFO if me_open else DIM))
+            fist_thr = max(det.T_OPEN, oe) * det.T_FIST_RATIO if oe else None
+            fist_ok  = fist_thr is not None and me < fist_thr
+            oe_str   = f"{oe:.2f}" if oe else "?"
+            thr_str  = f"{fist_thr:.2f}" if fist_thr else "?"
+            _put(f"  me {me:.2f}  open_base {oe_str}  fist<{thr_str}{'Y' if fist_ok else 'N'}"
+                 f"  {'PENDING' if fp else f'int={fi:.2f}'}",
+                 OK if fp else (INFO if fist_ok else DIM))
 
             y += 6
 

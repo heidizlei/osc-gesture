@@ -402,9 +402,15 @@ class GestureDetector:
             ang_vel = self._rotation_angular_vel(times, lms) if len(times) >= 2 else 0.0
             index_hold = (now - s.index_since) if s.index_since is not None else 0.0
             ext_frame = self._extension(lms[-1]) if lms else None
+            disp_thr_dbg = (self.T_CHORD_TIP_DISP_IN_RUNS
+                            if self._active_mode == 'runs'
+                            else self.T_CHORD_TIP_DISP)
+            idx_suppressed_dbg = (s.index_ext_since is not None and
+                                  (now - s.index_ext_since) >= self.T_INDEX_SUPPRESS)
             dbg.append({
                 'tip_artic':       feat['tip_artic']  if feat else None,
                 'tip_disp':        feat['tip_disp']   if feat else None,
+                'mcp_speed':       feat['mcp_speed']  if feat else None,
                 'ext_change':      feat['ext_change'] if feat else None,
                 'ang_vel':         ang_vel,
                 'index_hold':      index_hold,
@@ -417,12 +423,17 @@ class GestureDetector:
                 ) / (float(np.linalg.norm(lms[-1][MCPS4] - lms[-1][[0]], axis=1).mean()) + 1e-6)
                 ) if lms else 0.0,
                 'mean_ext':        s.mean_ext,
+                'open_ext':        s.open_ext,
                 'fist_pending':    s.fist_pending,
                 'fist_intensity':  s.fist_intensity,
+                'index_suppressed': idx_suppressed_dbg,
+                'disp_thr':        disp_thr_dbg,
                 'is_chord': bool(feat and
-                                 feat['tip_disp']  >= self.T_CHORD_TIP_DISP and
+                                 feat['tip_disp']  >= disp_thr_dbg and
                                  feat['mcp_speed'] >= self.T_CHORD_MCP),
                 'is_run':   bool(feat and
+                                 not idx_suppressed_dbg and
+                                 s.mean_ext >= self.T_RUN_OPEN and
                                  feat['tip_artic']  >= self.T_RUN_TIP_ARTIC and
                                  feat['ext_change'] >= self.T_RUN_EXT),
             })
