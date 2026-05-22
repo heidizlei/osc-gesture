@@ -48,7 +48,7 @@ class GestureDetector:
     T_INDEX_EXT       = 0.60   # extension ratio — index counts as extended (lowered for new angle)
     T_OTHERS_DIST_RATIO = 1.0  # max (others_tip_dist / hand_size) — normalised, camera-angle independent
                                # faster (curled): p90=0.96; noop/runs (extended): p10=1.24
-    T_FIST        = 0.50   # mean extension — hand counts as fist (requires tighter clench)
+    T_FIST        = 0.58   # mean extension — hand counts as fist
     T_OPEN        = 0.70   # mean extension — hand counts as open
     T_FIST_HOLD   = 0.10   # s — must hold fist this long to confirm
     T_INDEX_HOLD      = 0.333  # s — full faster pose must be held to arm faster
