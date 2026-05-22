@@ -22,7 +22,7 @@ class OSCGestureApp:
                  camera_index=0,
                  ip="0.0.0.0",
                  port=9001):
-        self.interval = (-6, 6)
+        self.interval = (-8, 8)
 
         # OSC client
         self.osc_client = udp_client.SimpleUDPClient(ip, port)
