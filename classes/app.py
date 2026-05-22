@@ -90,8 +90,17 @@ class OSCGestureApp:
         wy = np.full(2, np.nan, dtype=np.float32)
         if results and results.hand_landmarks:
             for i, hand in enumerate(results.hand_landmarks[:2]):
-                wy[i] = hand[0].y   # landmark 0 = wrist, y = vertical screen position
+                wy[i] = hand[0].y
         return wy
+
+    def _extract_image_landmarks(self, results):
+        """Image-space landmarks (2, 21, 3) float32, NaN for missing hands."""
+        lm = np.full((2, 21, 3), np.nan, dtype=np.float32)
+        if results and results.hand_landmarks:
+            for i, hand in enumerate(results.hand_landmarks[:2]):
+                for j, p in enumerate(hand):
+                    lm[i, j] = (p.x, p.y, p.z)
+        return lm
 
     def _draw_gesture_hud(self, frame, mode, intensity):
         color = _MODE_COLORS.get(mode, (160, 160, 160))
@@ -290,8 +299,10 @@ class OSCGestureApp:
                 # Gesture detection (runs every frame, reports every 500 ms)
                 wl  = self._extract_world_landmarks(results)
                 wy  = self._extract_wrist_img(results)
+                il  = self._extract_image_landmarks(results)
                 prev = self.gesture_result
-                self.gesture_result = self.gesture_detector.update(wl, time.time(), wrist_y=wy)
+                self.gesture_result = self.gesture_detector.update(
+                    wl, time.time(), wrist_y=wy, image_landmarks=il)
                 # Only tick the sender when a new report has been emitted
                 if self.gesture_result is not prev and self.mode == 'tempo':
                     mode, intensity = self.gesture_result

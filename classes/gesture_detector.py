@@ -7,12 +7,13 @@ MCPS4 = [5, 9, 13, 17]       # palm MCPs (no thumb)
 
 class _HandState:
     """Per-hand stateful tracking for slower and faster gestures."""
-    __slots__ = ('t_open', 'fist_start_t', 'fist_pending', 'fist_intensity',
+    __slots__ = ('t_open', 'open_ext', 'fist_start_t', 'fist_pending', 'fist_intensity',
                  'index_since', 'index_last_ok', 'mean_ext',
                  'index_ext_since')
 
     def __init__(self):
         self.t_open          = None   # last t where mean_ext > T_OPEN
+        self.open_ext        = None   # mean_ext at last open state (for relative fist detection)
         self.fist_start_t    = None   # when current fist epoch began
         self.fist_pending    = False  # fist confirmed, not yet reported
         self.fist_intensity  = 0.0
@@ -48,7 +49,9 @@ class GestureDetector:
     T_INDEX_EXT       = 0.60   # extension ratio — index counts as extended (lowered for new angle)
     T_OTHERS_DIST_RATIO = 1.0  # max (others_tip_dist / hand_size) — normalised, camera-angle independent
                                # faster (curled): p90=0.96; noop/runs (extended): p10=1.24
-    T_FIST        = 0.58   # mean extension — hand counts as fist
+    T_FIST_RATIO  = 0.73   # fist when mean_ext < max(T_OPEN, last_open_ext) * T_FIST_RATIO
+                           # new angle: open~0.78, fist~0.51 → ratio 0.65; old: open~0.82, fist~0.41 → 0.50
+                           # 0.78 reliably catches both without needing absolute threshold tuning
     T_OPEN        = 0.70   # mean extension — hand counts as open
     T_FIST_HOLD   = 0.10   # s — must hold fist this long to confirm
     T_INDEX_HOLD      = 0.333  # s — full faster pose must be held to arm faster
@@ -87,14 +90,17 @@ class GestureDetector:
     # Public interface
     # ------------------------------------------------------------------
 
-    def update(self, world_landmarks, t, wrist_y=None):
+    def update(self, world_landmarks, t, wrist_y=None, image_landmarks=None):
         """
         world_landmarks : np.ndarray (2, 21, 3), float32, NaN for missing hands
         t               : float, seconds since some fixed epoch (e.g. time.time())
         wrist_y         : np.ndarray (2,) normalised image-space wrist y [0,1], NaN if missing
+        image_landmarks : np.ndarray (2, 21, 3), float32 — image-space (x,y in [0,1], z ignored)
+                          used for fist detection (2D ext ratio is camera-angle stable)
         Returns (mode: str, intensity: float in [0, 1]).
         Mode is refreshed every REPORT_INTERVAL seconds.
         """
+        img_lm = image_landmarks if image_landmarks is not None else np.full((2, 21, 3), np.nan)
         self._buf.append((t, world_landmarks.copy(),
                           wrist_y.copy() if wrist_y is not None else np.full(2, np.nan)))
         cutoff = t - self.MAX_WINDOW
@@ -104,7 +110,8 @@ class GestureDetector:
         for hi in range(2):
             h = world_landmarks[hi]
             if not np.isnan(h[0, 0]):
-                self._tick_hand(hi, h, t)
+                h_img = img_lm[hi] if not np.isnan(img_lm[hi, 0, 0]) else None
+                self._tick_hand(hi, h, t, h_img)
 
         if t - self._last_report >= self.REPORT_INTERVAL:
             self._last_report = t
@@ -136,7 +143,7 @@ class GestureDetector:
             ext[i] = np.linalg.norm(tv) / (np.linalg.norm(mv) + 1e-6)
         return ext
 
-    def _tick_hand(self, hi, h, t):
+    def _tick_hand(self, hi, h, t, h_img=None):
         s   = self._hand_states[hi]
         ext = self._extension(h)
         me  = float(ext.mean())
@@ -151,13 +158,18 @@ class GestureDetector:
         index_ok = ext[1] > self.T_INDEX_EXT and others_dist_ok
 
         # --- Slower state machine (hysteresis: only resets on full open) ---
+        # Fist detected as a relative drop from the last open-hand baseline:
+        # me < open_ext * T_FIST_RATIO — camera-angle invariant since both
+        # numerator and denominator scale together with angle.
         # Skip when index is extended — the two gestures are physically exclusive.
         if not index_ok:
             if me > self.T_OPEN:
-                s.t_open       = t
+                s.t_open    = t
+                s.open_ext  = me   # record baseline for relative fist threshold
                 s.fist_start_t = None
                 # leave fist_pending intact so _detect() can consume it this tick
-            elif me < self.T_FIST:
+            elif (s.open_ext is not None and
+                  me < max(self.T_OPEN, s.open_ext) * self.T_FIST_RATIO):
                 if s.fist_start_t is None:
                     s.fist_start_t = t
                 elif not s.fist_pending and (t - s.fist_start_t >= self.T_FIST_HOLD):
@@ -168,7 +180,7 @@ class GestureDetector:
                             (dur - self.MIN_CLENCH) / (self.MAX_CLENCH - self.MIN_CLENCH),
                             0.0, 1.0))
                         s.fist_pending = True
-            # zone [T_FIST, T_OPEN]: transitional — maintain fist_start_t
+            # zone between fist threshold and T_OPEN: transitional — maintain fist_start_t
 
         # --- Index extension tracker (runs suppression) ---
         # Uses a higher threshold than the faster pose to avoid suppressing runs when
