@@ -22,7 +22,8 @@ class OSCGestureApp:
                  camera_index=0,
                  ip="0.0.0.0",
                  port=9001,
-                 baroque=False):
+                 baroque=False,
+                 mode="tempo"):
         self.interval = (-8, 8)
 
         # OSC client
@@ -52,6 +53,8 @@ class OSCGestureApp:
         self.inactivity_interval = 1.0
         self.last_osc_time = time.time()
         self.inactivity_message_sent = False
+
+        self.mode = mode   # 'pause-only', 'range', 'tempo'
 
         # Gesture detection + OSC sending
         self.gesture_detector = GestureDetector()
@@ -195,6 +198,8 @@ class OSCGestureApp:
     # ----------------------------
 
     def send_osc_message(self, left_val=None, right_val=None):
+        if self.mode == 'pause-only':
+            return
         if left_val == -1 and right_val == -1:
             arg1, arg2, arg3, arg4 = 36, 120, -1, -1
         else:
@@ -288,7 +293,7 @@ class OSCGestureApp:
                 prev = self.gesture_result
                 self.gesture_result = self.gesture_detector.update(wl, time.time(), wrist_y=wy)
                 # Only tick the sender when a new report has been emitted
-                if self.gesture_result is not prev:
+                if self.gesture_result is not prev and self.mode == 'tempo':
                     mode, intensity = self.gesture_result
                     self.gesture_sender.tick(mode, intensity, self.osc_client)
 
