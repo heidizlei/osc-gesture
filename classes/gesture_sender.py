@@ -30,7 +30,8 @@ class GestureSender:
         /resetControl []      before tempo; also after 2s noop while active
     """
 
-    RUNS_CHORDS_REQUIRED  = 3      # consecutive ticks to trigger
+    RUNS_CHORDS_REQUIRED  = 3      # consecutive ticks to trigger initial send
+    INTENSITY_WINDOW      = 6      # rolling window size for level decisions (ticks)
     FASTER_REQUIRED       = 2      # consecutive ticks to trigger
     MODE_LOCK_S           = 4.0    # seconds before runs↔chords switch is allowed
     TEMPO_BLOCK_S         = 4.0    # seconds between tempo messages
@@ -132,8 +133,13 @@ class GestureSender:
         else:
             self._cons_count += 1
             self._cons_intensities.append(intensity)
+            # Cap rolling window — keep most recent INTENSITY_WINDOW readings
+            if len(self._cons_intensities) > self.INTENSITY_WINDOW:
+                self._cons_intensities.pop(0)
 
         if self._cons_count >= self.RUNS_CHORDS_REQUIRED:
+            # Level is determined from the full rolling window once available,
+            # requiring the intensity shift to persist over more ticks.
             avg  = sum(self._cons_intensities) / len(self._cons_intensities)
             lvl  = _runs_level(avg) if mode == 'runs' else _chords_level(avg)
             # only send if level changed (or first send)
@@ -143,8 +149,8 @@ class GestureSender:
                 self._last_sent_mode  = mode
                 self._last_sent_level = lvl
                 self._last_sent_t     = now
-            self._cons_count       = 0
-            self._cons_intensities = []
+            # Do not reset count — keep accumulating so the rolling window
+            # stays populated and level decisions remain stable
 
     # ------------------------------------------------------------------
 
