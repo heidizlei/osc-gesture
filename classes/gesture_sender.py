@@ -35,6 +35,7 @@ class GestureSender:
     MODE_LOCK_S           = 4.0    # seconds before runs↔chords switch is allowed
     TEMPO_BLOCK_S         = 4.0    # seconds between tempo messages
     NOOP_RESET_S          = 2.0    # seconds of noop before sending resetControl
+    CHORDS_LOCK_RUN_MIN   = 0.50   # runs intensity must exceed this to accumulate while chords locked
 
     FASTER_RATIO = 1.7
     SLOWER_RATIO = 0.6
@@ -121,6 +122,10 @@ class GestureSender:
         if mode != self._cons_mode:
             if in_lock and mode != self._last_sent_mode:
                 return   # locked to sent mode, ignore different mode
+            # When locked in chords, require stronger runs signal to start accumulating
+            if (mode == 'runs' and self._last_sent_mode == 'chords' and in_lock
+                    and intensity < self.CHORDS_LOCK_RUN_MIN):
+                return
             self._cons_mode       = mode
             self._cons_count      = 1
             self._cons_intensities = [intensity]
