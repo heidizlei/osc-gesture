@@ -4,6 +4,7 @@ import numpy as np
 from pythonosc import udp_client
 from .tracker import HandTracker, HandLandmarkDrawer
 from .gesture_detector import GestureDetector
+from .gesture_sender import GestureSender
 import gc
 
 _MODE_COLORS = {
@@ -51,8 +52,9 @@ class OSCGestureApp:
         self.last_osc_time = time.time()
         self.inactivity_message_sent = False
 
-        # Gesture detection
+        # Gesture detection + OSC sending
         self.gesture_detector = GestureDetector()
+        self.gesture_sender   = GestureSender()
         self.gesture_result   = ('noop', 0.0)
         self.debug_mode       = False  # toggle with 'd' key
 
@@ -278,9 +280,14 @@ class OSCGestureApp:
                 self.hand_present = bool(results and results.hand_landmarks)
 
                 # Gesture detection (runs every frame, reports every 500 ms)
-                wl = self._extract_world_landmarks(results)
-                wy = self._extract_wrist_img(results)
+                wl  = self._extract_world_landmarks(results)
+                wy  = self._extract_wrist_img(results)
+                prev = self.gesture_result
                 self.gesture_result = self.gesture_detector.update(wl, time.time(), wrist_y=wy)
+                # Only tick the sender when a new report has been emitted
+                if self.gesture_result is not prev:
+                    mode, intensity = self.gesture_result
+                    self.gesture_sender.tick(mode, intensity, self.osc_client)
 
                 # Send pause/unpause only when state changes
                 if self.hand_present != self.last_hand_present:
