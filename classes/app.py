@@ -60,8 +60,10 @@ class OSCGestureApp:
         self.debug_mode       = False  # toggle with 'd' key
 
         # Hand presence tracking
-        self.hand_present = False
-        self.last_hand_present = False
+        self.hand_present       = False
+        self.last_hand_present  = False
+        self.hand_absent_since  = None   # timestamp when hand first disappeared
+        self.PAUSE_ABSENT_S     = 0.5    # seconds of sustained absence before sending pause
 
         # Only top part of camera image is active for control
         self.active_area_ratio = 3 / 4
@@ -290,13 +292,21 @@ class OSCGestureApp:
                     mode, intensity = self.gesture_result
                     self.gesture_sender.tick(mode, intensity, self.osc_client)
 
-                # Send pause/unpause only when state changes
-                if self.hand_present != self.last_hand_present:
-                    if self.hand_present:
-                        self.send_manual_pause(0)  # resume
-                    else:
-                        self.send_manual_pause(1)  # pause
-                    self.last_hand_present = self.hand_present
+                # Send pause only after hand has been absent for PAUSE_ABSENT_S,
+                # to avoid spurious pause/resume on brief detection dropouts.
+                now = time.time()
+                if self.hand_present:
+                    self.hand_absent_since = None
+                    if not self.last_hand_present:
+                        self.send_manual_pause(0)  # resume immediately on reappearance
+                        self.last_hand_present = True
+                else:
+                    if self.hand_absent_since is None:
+                        self.hand_absent_since = now
+                    elif (self.last_hand_present and
+                          now - self.hand_absent_since >= self.PAUSE_ABSENT_S):
+                        self.send_manual_pause(1)  # pause after sustained absence
+                        self.last_hand_present = False
 
                 if self.hand_present:
                     positions = []
