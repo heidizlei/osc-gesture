@@ -57,8 +57,7 @@ class GestureDetector:
 
     # Intensity normalisation
     NORM_RUN         = 0.25   # m/s — palm-normal projected tip_artic at which run_intensity = 1.0
-    NORM_CHORD_FREQ  = 4.0    # Hz  — petting frequency at which chord_intensity = 1.0
-    NORM_CHORD_MCP   = 0.50   # m/s — mcp_speed proxy when frequency not yet available
+    NORM_CHORD_MCP   = 0.50   # m/s — mcp_speed at which chord_intensity = 1.0
     NORM_ROTATE = 8.0    # rad/s — scaled up for index-tip angular velocity range
     MIN_CLENCH  = 0.10   # s    — fastest clench → intensity = 1.0
     MAX_CLENCH  = 0.60   # s    — slowest clench → intensity = 0.0 (observed range 0.07–0.58s)
@@ -453,15 +452,7 @@ class GestureDetector:
             is_chord = (feat['tip_disp']  >= self.T_CHORD_TIP_DISP and
                         feat['mcp_speed'] >= self.T_CHORD_MCP)
             if is_chord:
-                # Intensity from petting frequency over 2s look-back window.
-                # Falls back to mcp_speed proxy until enough crossings accumulate,
-                # giving a continuous signal from the first report tick.
-                freq_times, freq_lms = self._hand_window(hi, 2.0)
-                freq = self._chord_frequency(freq_times, freq_lms)
-                if freq > 0:
-                    intensity = float(np.clip(freq / self.NORM_CHORD_FREQ, 0.0, 1.0))
-                else:
-                    intensity = float(np.clip(feat['mcp_speed'] / self.NORM_CHORD_MCP, 0.0, 1.0))
+                intensity = float(np.clip(feat['mcp_speed'] / self.NORM_CHORD_MCP, 0.0, 1.0))
                 if intensity > best_intensity:
                     best_mode, best_intensity = 'chords', intensity
             elif (not index_suppressed and
