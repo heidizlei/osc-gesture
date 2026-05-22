@@ -54,7 +54,7 @@ class OSCGestureApp:
         self.last_osc_time = time.time()
         self.inactivity_message_sent = False
 
-        self.mode = mode   # 'pause-only', 'range', 'tempo'
+        self.mode = mode   # 'pause', 'range', 'tempo'
 
         # Gesture detection + OSC sending
         self.gesture_detector = GestureDetector()
@@ -198,7 +198,7 @@ class OSCGestureApp:
     # ----------------------------
 
     def send_osc_message(self, left_val=None, right_val=None):
-        if self.mode == 'pause-only':
+        if self.mode == 'pause':
             return
         if left_val == -1 and right_val == -1:
             arg1, arg2, arg3, arg4 = 36, 120, -1, -1
