@@ -70,7 +70,7 @@ class GestureDetector:
 
     # Hysteresis
     NOOP_DEAD_TIME = 0.30  # s — hold last active mode this long before dropping to noop
-    SWITCH_HOLD    = 0.50  # s — new mode must be consistently detected this long before
+    SWITCH_HOLD    = 1.00  # s — new mode must be consistently detected this long before
                            #     switching away from an existing active mode
 
     def __init__(self):

@@ -116,6 +116,19 @@ class OSCGestureApp:
             cv2.rectangle(frame, (bar_x, bar_y), (bar_x + filled, bar_y + bar_h),
                           color, -1)
 
+        # Last sent mode — top right, white background
+        sent_mode  = self.gesture_sender._last_sent_mode or 'none'
+        sent_level = self.gesture_sender._last_sent_level
+        sent_label = sent_mode if sent_level is None else f"{sent_mode} L{sent_level}"
+        sent_color = _MODE_COLORS.get(sent_mode, (80, 80, 80))
+        font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
+        (tw, th), bl = cv2.getTextSize(sent_label, font, scale, thick)
+        h, w = frame.shape[:2]
+        tx = w - tw - 16
+        ty = th + 12
+        cv2.rectangle(frame, (tx - 8, 4), (w - 4, ty + bl + 6), (255, 255, 255), -1)
+        cv2.putText(frame, sent_label, (tx, ty), font, scale, sent_color, thick, cv2.LINE_AA)
+
     def _draw_debug_hud(self, frame):
         """Overlay raw decision scores for each hand (toggle with 'd')."""
         det  = self.gesture_detector
