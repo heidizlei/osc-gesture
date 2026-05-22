@@ -21,7 +21,8 @@ class OSCGestureApp:
                  model_path="hand_landmarker.task",
                  camera_index=0,
                  ip="0.0.0.0",
-                 port=9001):
+                 port=9001,
+                 baroque=False):
         self.interval = (-8, 8)
 
         # OSC client
@@ -54,7 +55,7 @@ class OSCGestureApp:
 
         # Gesture detection + OSC sending
         self.gesture_detector = GestureDetector()
-        self.gesture_sender   = GestureSender()
+        self.gesture_sender   = GestureSender(baroque=baroque)
         self.gesture_result   = ('noop', 0.0)
         self.debug_mode       = False  # toggle with 'd' key
 

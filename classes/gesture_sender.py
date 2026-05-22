@@ -41,7 +41,12 @@ class GestureSender:
     FASTER_RATIO = 1.7
     SLOWER_RATIO = 0.6
 
-    def __init__(self):
+    # Baroque mode caps: highest allowed level index per mode (higher index = slower/gentler)
+    BAROQUE_MAX_RUNS   = 2   # L2 = Moderate (caps VeryFast/Fast)
+    BAROQUE_MAX_CHORDS = 1   # L1 = Moderate (caps Fast)
+
+    def __init__(self, baroque=False):
+        self.baroque = baroque
         # Runs/chords accumulator
         self._cons_mode       = None
         self._cons_count      = 0
@@ -142,6 +147,9 @@ class GestureSender:
             # requiring the intensity shift to persist over more ticks.
             avg  = sum(self._cons_intensities) / len(self._cons_intensities)
             lvl  = _runs_level(avg) if mode == 'runs' else _chords_level(avg)
+            if self.baroque:
+                cap = self.BAROQUE_MAX_RUNS if mode == 'runs' else self.BAROQUE_MAX_CHORDS
+                lvl = max(lvl, cap)   # higher index = slower; clamp upward
             # only send if level changed (or first send)
             if lvl != self._last_sent_level or mode != self._last_sent_mode:
                 addr = '/playRuns' if mode == 'runs' else '/playChords'
