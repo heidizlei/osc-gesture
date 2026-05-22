@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OSC Controller</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #282828;
+    color: #e8e8e8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15px;
+    padding: 24px 20px 40px;
+    max-width: 780px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    text-align: center;
+    font-size: 1.4rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    margin-bottom: 28px;
+    color: #ccc;
+  }
+
+  section {
+    background: #333;
+    border-radius: 10px;
+    padding: 18px 20px 16px;
+    margin-bottom: 18px;
+  }
+
+  section h2 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #888;
+    margin-bottom: 14px;
+  }
+
+  /* ---- Pitch Range ---- */
+  #pitchCanvas {
+    display: block;
+    width: 100%;
+    height: 60px;
+    cursor: crosshair;
+    border-radius: 6px;
+  }
+  .pitch-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .pitch-controls label {
+    font-size: 0.88rem;
+    color: #aaa;
+  }
+  #semitoneInput {
+    width: 62px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid #555;
+    background: #282828;
+    color: #e8e8e8;
+    font-size: 0.9rem;
+    text-align: center;
+  }
+  .pitch-info {
+    display: flex;
+    gap: 20px;
+    margin-top: 8px;
+    font-size: 0.82rem;
+  }
+  #hand1Info { color: #f0883e; }
+  #hand2Info { color: #6ab3f7; }
+
+  /* ---- Button grids ---- */
+  .btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  button {
+    cursor: pointer;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    transition: filter 0.1s, transform 0.08s;
+    user-select: none;
+  }
+  button:active { transform: scale(0.95); filter: brightness(0.85); }
+
+  .btn-runs   { background: #2563a8; color: #d0e8ff; }
+  .btn-chords { background: #1e7a42; color: #c6f0d6; }
+  .btn-reset  { background: #7a3a1e; color: #ffd6c6; }
+  .btn-tempo-up   { background: #5a4b8a; color: #ddd4ff; }
+  .btn-tempo-down { background: #8a6a2a; color: #fff0cc; }
+
+  button:hover { filter: brightness(1.18); }
+
+  /* ---- Status bar ---- */
+  #statusBar {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: #1a1a1a;
+    border-top: 1px solid #555;
+    padding: 8px 18px;
+    font-size: 0.92rem;
+    color: #666;
+    font-family: monospace;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #statusBar.ok  { color: #4dbb88; }
+  #statusBar.err { color: #f66; }
+
+  /* ---- Tempo section layout ---- */
+  .tempo-label {
+    font-size: 0.8rem;
+    color: #888;
+    margin-bottom: 6px;
+  }
+  .tempo-group { margin-bottom: 10px; }
+  .tempo-group:last-child { margin-bottom: 0; }
+</style>
+</head>
+<body>
+
+<h1>OSC Controller</h1>
+
+<!-- ================================================================ -->
+<!-- 1. Pitch Range                                                    -->
+<!-- ================================================================ -->
+<section>
+  <h2>Pitch Range</h2>
+  <canvas id="pitchCanvas"></canvas>
+  <div class="pitch-controls">
+    <label for="semitoneInput">±&thinsp;semitones</label>
+    <input type="number" id="semitoneInput" min="1" max="36" value="12">
+  </div>
+  <div class="pitch-info">
+    <span id="hand1Info">Hand 1: —</span>
+    <span id="hand2Info">Hand 2: —</span>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<!-- 2. Runs + Reset + Chords                                          -->
+<!-- ================================================================ -->
+<section>
+  <h2>Runs &amp; Chords</h2>
+  <div class="btn-row" style="margin-bottom:12px;">
+    <button class="btn-runs"   onclick="sendRuns(0)">VeryFast (L0)</button>
+    <button class="btn-runs"   onclick="sendRuns(1)">Fast (L1)</button>
+    <button class="btn-runs"   onclick="sendRuns(2)">Moderate (L2)</button>
+    <button class="btn-runs"   onclick="sendRuns(3)">Slow (L3)</button>
+    <button class="btn-reset"  onclick="sendReset()">Reset</button>
+  </div>
+  <div class="btn-row">
+    <button class="btn-chords" onclick="sendChords(0)">Fast (L0)</button>
+    <button class="btn-chords" onclick="sendChords(1)">Moderate (L1)</button>
+    <button class="btn-chords" onclick="sendChords(2)">Slow (L2)</button>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<!-- 3. Adjust Tempo                                                   -->
+<!-- ================================================================ -->
+<section>
+  <h2>Adjust Tempo</h2>
+  <div class="tempo-group">
+    <div class="tempo-label">Speed Up</div>
+    <div class="btn-row">
+      <button class="btn-tempo-up" onclick="sendTempo(1.2)">×1.2</button>
+      <button class="btn-tempo-up" onclick="sendTempo(1.4)">×1.4</button>
+      <button class="btn-tempo-up" onclick="sendTempo(1.7)">×1.7</button>
+      <button class="btn-tempo-up" onclick="sendTempo(2.0)">×2.0</button>
+    </div>
+  </div>
+  <div class="tempo-group">
+    <div class="tempo-label">Slow Down</div>
+    <div class="btn-row">
+      <button class="btn-tempo-down" onclick="sendTempo(0.8)">×0.8</button>
+      <button class="btn-tempo-down" onclick="sendTempo(0.7)">×0.7</button>
+      <button class="btn-tempo-down" onclick="sendTempo(0.6)">×0.6</button>
+      <button class="btn-tempo-down" onclick="sendTempo(0.5)">×0.5</button>
+    </div>
+  </div>
+</section>
+
+<div id="statusBar">Ready</div>
+
+<script>
+// ------------------------------------------------------------------ //
+// MIDI note name helper: C0 = 12, C4 = 60                            //
+// ------------------------------------------------------------------ //
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function midiName(n) {
+  const octave = Math.floor(n / 12) - 1;
+  const name   = NOTE_NAMES[n % 12];
+  return `${name}${octave}`;
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// ------------------------------------------------------------------ //
+// Canvas pitch slider                                                 //
+// ------------------------------------------------------------------ //
+const canvas = document.getElementById('pitchCanvas');
+const ctx    = canvas.getContext('2d');
+
+// MIDI range shown on track
+const MIDI_LO = 21;   // A0
+const MIDI_HI = 108;  // C8
+
+// Handle state: center MIDI notes for each hand
+const handles = [60, 79];   // hand1=C4, hand2=G5
+const COLORS  = ['#f0883e', '#6ab3f7'];
+let linkedMode = false;      // true = single merged handle
+const BAND_ALPHA = 0.28;
+
+const semitoneInput = document.getElementById('semitoneInput');
+const hand1Info     = document.getElementById('hand1Info');
+const hand2Info     = document.getElementById('hand2Info');
+
+function getSemitones() {
+  const v = parseInt(semitoneInput.value, 10);
+  return isNaN(v) ? 12 : clamp(v, 1, 36);
+}
+
+// Map MIDI note → canvas x pixel
+function noteToX(note, w) {
+  return (note - MIDI_LO) / (MIDI_HI - MIDI_LO) * w;
+}
+// Map canvas x → MIDI note (float)
+function xToNote(x, w) {
+  return MIDI_LO + (x / w) * (MIDI_HI - MIDI_LO);
+}
+
+// Octave C notes visible in range (C2=36 … C8=108)
+const OCTAVE_MARKERS = [];
+for (let midi = 36; midi <= 108; midi += 12) OCTAVE_MARKERS.push(midi);
+
+function drawSlider() {
+  const rect = canvas.getBoundingClientRect();
+  const W = rect.width;
+  const H = rect.height;
+  const sem = getSemitones();
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Track background
+  const trackY = 28, trackH = 10;
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.roundRect(0, trackY, W, trackH, 4);
+  ctx.fill();
+
+  // Draw range bands and handles
+  const handleR = 9;
+  const handleY = trackY + trackH / 2;
+
+  if (linkedMode) {
+    const lo = clamp(handles[0] - sem, MIDI_LO, MIDI_HI);
+    const hi = clamp(handles[0] + sem, MIDI_LO, MIDI_HI);
+    ctx.globalAlpha = BAND_ALPHA;
+    ctx.fillStyle = '#ccc';
+    ctx.beginPath();
+    ctx.roundRect(noteToX(lo, W), trackY, noteToX(hi, W) - noteToX(lo, W), trackH, 4);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  } else {
+    handles.forEach((center, i) => {
+      const lo = clamp(center - sem, MIDI_LO, MIDI_HI);
+      const hi = clamp(center + sem, MIDI_LO, MIDI_HI);
+      ctx.globalAlpha = BAND_ALPHA;
+      ctx.fillStyle = COLORS[i];
+      ctx.beginPath();
+      ctx.roundRect(noteToX(lo, W), trackY, noteToX(hi, W) - noteToX(lo, W), trackH, 4);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    });
+  }
+
+  // Octave markers
+  ctx.fillStyle = '#555';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  OCTAVE_MARKERS.forEach(midi => {
+    const x = noteToX(midi, W);
+    ctx.fillStyle = '#555';
+    ctx.fillRect(x - 0.5, trackY - 5, 1, 5);
+    ctx.fillStyle = '#666';
+    ctx.fillText(midiName(midi), x, trackY - 7);
+  });
+
+  // Handles
+  if (linkedMode) {
+    const x = noteToX(handles[0], W);
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 4;
+    ctx.beginPath();
+    ctx.arc(x, handleY, handleR, 0, Math.PI * 2);
+    ctx.fillStyle = '#ddd';
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#222';
+    ctx.font = 'bold 8px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('L', x, handleY + 3);
+  } else {
+    handles.forEach((center, i) => {
+      const x = noteToX(center, W);
+      ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 4;
+      ctx.beginPath();
+      ctx.arc(x, handleY, handleR, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS[i];
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#111';
+      ctx.font = 'bold 9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(i + 1, x, handleY + 3.5);
+    });
+  }
+
+  // Info labels
+  updateInfoLabels(sem);
+}
+
+function updateInfoLabels(sem) {
+  sem = sem ?? getSemitones();
+  if (linkedMode) {
+    const lo = clamp(handles[0] - sem, 0, 127);
+    const hi = clamp(handles[0] + sem, 0, 127);
+    hand1Info.textContent = `Linked: ${midiName(handles[0])} (${handles[0]}) → [${lo}, ${hi}]`;
+    hand2Info.textContent = '';
+  } else {
+    [handles[0], handles[1]].forEach((center, i) => {
+      const lo = clamp(center - sem, 0, 127);
+      const hi = clamp(center + sem, 0, 127);
+      const label = `Hand ${i+1}: ${midiName(center)} (${center}) → [${lo}, ${hi}]`;
+      if (i === 0) hand1Info.textContent = label;
+      else         hand2Info.textContent = label;
+    });
+  }
+}
+
+// Throttle pitch sends to at most once per 500 ms
+let pitchThrottleTimer = null;
+let pitchPending = false;
+
+function sendPitchRange() {
+  if (pitchThrottleTimer !== null) {
+    pitchPending = true;  // will fire when the current window expires
+    return;
+  }
+  _flushPitchRange();
+  pitchThrottleTimer = setTimeout(() => {
+    pitchThrottleTimer = null;
+    if (pitchPending) { pitchPending = false; _flushPitchRange(); }
+  }, 500);
+}
+
+function _flushPitchRange() {
+  const sem = getSemitones();
+  if (linkedMode) {
+    const lo = clamp(handles[0] - sem, 0, 127);
+    const hi = clamp(handles[0] + sem, 0, 127);
+    sendOSC('/setOutputRange', [lo, hi, lo, hi]);
+  } else {
+    const lo1 = clamp(handles[0] - sem, 0, 127);
+    const hi1 = clamp(handles[0] + sem, 0, 127);
+    const lo2 = clamp(handles[1] - sem, 0, 127);
+    const hi2 = clamp(handles[1] + sem, 0, 127);
+    sendOSC('/setOutputRange', [lo1, hi1, lo2, hi2]);
+  }
+}
+
+// ---- Sizing: keep canvas pixel dims in sync with CSS layout ----
+function resizeCanvas() {
+  const rect = canvas.getBoundingClientRect();
+  const dpr  = window.devicePixelRatio || 1;
+  canvas.width  = rect.width  * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);  // reset + set scale each time
+  drawSlider();
+}
+
+// ---- Drag handling ----
+let dragging        = null;   // handle index being dragged
+let dragStartX      = null;   // canvas-x where press began
+let dragStartHandle = null;   // handle index chosen at press
+const DRAG_THRESHOLD = 4;     // px before drag activates
+
+function pickHandle(ex) {
+  if (linkedMode) return 0;
+  const W = canvas.getBoundingClientRect().width;
+  const dists = handles.map(c => Math.abs(noteToX(c, W) - ex));
+  return dists[0] <= dists[1] ? 0 : 1;
+}
+
+function pointerX(e) {
+  const rect = canvas.getBoundingClientRect();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  return clientX - rect.left;
+}
+
+canvas.addEventListener('mousedown', e => {
+  e.preventDefault();
+  dragStartX      = pointerX(e);
+  dragStartHandle = pickHandle(dragStartX);
+  dragging        = null;
+});
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  dragStartX      = pointerX(e);
+  dragStartHandle = pickHandle(dragStartX);
+  dragging        = null;
+}, { passive: false });
+
+function moveDrag(e) {
+  const x    = pointerX(e);
+  const note = Math.round(clamp(xToNote(x, canvas.getBoundingClientRect().width), MIDI_LO, MIDI_HI));
+  handles[dragging] = note;
+  if (linkedMode) handles[1] = handles[0];
+  drawSlider();
+  sendPitchRange();
+}
+
+window.addEventListener('mousemove', e => {
+  if (dragStartHandle === null) return;
+  if (dragging === null) {
+    if (Math.abs(pointerX(e) - dragStartX) >= DRAG_THRESHOLD)
+      dragging = dragStartHandle;
+  }
+  if (dragging !== null) moveDrag(e);
+});
+window.addEventListener('mouseup', () => {
+  dragging = null; dragStartX = null; dragStartHandle = null;
+});
+window.addEventListener('touchmove', e => {
+  if (dragStartHandle === null) return;
+  if (dragging === null) {
+    if (Math.abs(pointerX(e) - dragStartX) >= DRAG_THRESHOLD)
+      dragging = dragStartHandle;
+  }
+  if (dragging !== null) { e.preventDefault(); moveDrag(e); }
+}, { passive: false });
+window.addEventListener('touchend', () => {
+  dragging = null; dragStartX = null; dragStartHandle = null;
+});
+
+// ---- Double-click: toggle linked / two-handle mode ----
+canvas.addEventListener('dblclick', e => {
+  e.preventDefault();
+  const x = pointerX(e);
+  if (linkedMode) {
+    // Expand: both handles start at current single position
+    handles[1] = handles[0];
+    linkedMode = false;
+  } else {
+    // Collapse: keep handle closest to click
+    const closest = pickHandle(x);
+    handles[0] = handles[closest];
+    linkedMode = true;
+  }
+  drawSlider();
+  sendPitchRange();
+});
+
+semitoneInput.addEventListener('input',  () => { drawSlider(); sendPitchRange(); });
+semitoneInput.addEventListener('change', () => { drawSlider(); sendPitchRange(); });
+
+// Initial render — defer until layout is complete so getBoundingClientRect is right
+window.addEventListener('load', () => {
+  resizeCanvas();
+  sendPitchRange();
+});
+window.addEventListener('resize', resizeCanvas);
+
+// ------------------------------------------------------------------ //
+// Action senders                                                      //
+// ------------------------------------------------------------------ //
+let runsOrChordsActive = false;
+
+function sendRuns(level)   { runsOrChordsActive = true;  sendOSC('/playRuns',   [level]); }
+function sendChords(level) { runsOrChordsActive = true;  sendOSC('/playChords', [level]); }
+function sendReset()       { runsOrChordsActive = false; sendOSC('/resetControl', []); }
+
+async function sendTempo(ratio) {
+  if (runsOrChordsActive) {
+    await sendOSC('/resetControl', []);
+    runsOrChordsActive = false;
+  }
+  sendOSC('/adjustTempo', [ratio]);
+}
+
+// ------------------------------------------------------------------ //
+// POST to Python bridge                                               //
+// ------------------------------------------------------------------ //
+const statusBar = document.getElementById('statusBar');
+let statusTimer = null;
+
+function setStatus(msg, cls) {
+  statusBar.textContent = msg;
+  statusBar.className = cls || '';
+  // Only auto-clear errors, not successful sends
+  clearTimeout(statusTimer);
+  if (cls === 'err') {
+    statusTimer = setTimeout(() => {
+      statusBar.textContent = 'Ready';
+      statusBar.className = '';
+    }, 4000);
+  }
+}
+
+async function sendOSC(address, args) {
+  const argsStr = args.map(a => (typeof a === 'number' && !Number.isInteger(a))
+    ? a.toFixed(2) : String(a)).join(' ');
+  const cmdStr = args.length ? `${address}  ${argsStr}` : address;
+  const body = JSON.stringify({ address, args });
+  try {
+    const res = await fetch('/osc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body
+    });
+    if (res.ok) {
+      setStatus(cmdStr, 'ok');
+    } else {
+      const txt = await res.text();
+      setStatus(`Error ${res.status}: ${txt}`, 'err');
+    }
+  } catch (e) {
+    setStatus(`Network error: ${e.message}`, 'err');
+  }
+}
+</script>
+</body>
+</html>
