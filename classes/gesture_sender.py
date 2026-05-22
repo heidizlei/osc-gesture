@@ -38,8 +38,10 @@ class GestureSender:
     NOOP_RESET_S          = 2.0    # seconds of noop before sending resetControl
     CHORDS_LOCK_RUN_MIN   = 0.50   # runs intensity must exceed this to accumulate while chords locked
 
-    FASTER_RATIO = 1.7
-    SLOWER_RATIO = 0.6
+    FASTER_RATIO         = 1.7
+    SLOWER_RATIO         = 0.6
+    BAROQUE_FASTER_RATIO = 1.4
+    BAROQUE_SLOWER_RATIO = 0.7
 
     # Baroque mode caps: highest allowed level index per mode (higher index = slower/gentler)
     BAROQUE_MAX_RUNS   = 2   # L2 = Moderate (caps VeryFast/Fast)
@@ -78,7 +80,8 @@ class GestureSender:
             self._faster_count = 0
             self._noop_since  = None
             if now >= self._tempo_blocked_until:
-                self._send_tempo(self.SLOWER_RATIO, osc_client)
+                ratio = self.BAROQUE_SLOWER_RATIO if self.baroque else self.SLOWER_RATIO
+                self._send_tempo(ratio, osc_client)
                 self._tempo_blocked_until = now + self.TEMPO_BLOCK_S
             return
 
@@ -91,7 +94,8 @@ class GestureSender:
             self._noop_since = None
             self._faster_count += 1
             if self._faster_count >= self.FASTER_REQUIRED and now >= self._tempo_blocked_until:
-                self._send_tempo(self.FASTER_RATIO, osc_client)
+                ratio = self.BAROQUE_FASTER_RATIO if self.baroque else self.FASTER_RATIO
+                self._send_tempo(ratio, osc_client)
                 self._tempo_blocked_until = now + self.TEMPO_BLOCK_S
                 self._faster_count = 0
             return
