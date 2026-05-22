@@ -47,7 +47,7 @@ class GestureDetector:
     T_INDEX_EXT   = 0.80   # extension ratio — index counts as "extended"
     T_OTHERS_DIST = 0.11   # m — max tip-to-wrist distance for middle/ring/pinky (curled = near wrist)
                            #     faster: ~0.07-0.09m (curled), runs: ~0.13-0.17m (extended)
-    T_FIST        = 0.58   # mean extension — hand counts as fist
+    T_FIST        = 0.50   # mean extension — hand counts as fist (requires tighter clench)
     T_OPEN        = 0.70   # mean extension — hand counts as open
     T_FIST_HOLD   = 0.10   # s — must hold fist this long to confirm
     T_INDEX_HOLD      = 0.333  # s — full faster pose must be held to arm faster
