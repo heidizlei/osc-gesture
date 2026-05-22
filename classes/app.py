@@ -207,9 +207,8 @@ class OSCGestureApp:
             me = sc['mean_ext']
             fi = sc['fist_intensity']
             fp = sc['fist_pending']
-            me_fist = me < det.T_FIST
             me_open = me > det.T_OPEN
-            _put(f"  mean_ext {me:.2f}  {'<FIST' if me_fist else ('>OPEN' if me_open else 'mid')}"
+            _put(f"  mean_ext {me:.2f}  {'>OPEN' if me_open else 'mid'}"
                  f"  fist={'PENDING' if fp else f'int={fi:.2f}'}",
                  OK if fp else (INFO if me_fist else DIM))
 
