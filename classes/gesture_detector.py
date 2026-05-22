@@ -39,8 +39,8 @@ class GestureDetector:
     # Detection thresholds
     T_CHORD_MCP        = 0.10   # m/s — mcp_speed_wr floor for chords; filters rigid wrist
                            #     translation (no palm pivot → near-zero mcp_speed)
-    T_CHORD_TIP_DISP        = 0.08   # m   — tip displacement floor for chords (default)
-    T_CHORD_TIP_DISP_IN_RUNS = 0.10  # m   — raised threshold when already in runs mode
+    T_CHORD_TIP_DISP        = 0.90   # normalised (tip_disp/hand_size) floor for chords
+    T_CHORD_TIP_DISP_IN_RUNS = 1.10  # raised threshold when already in runs mode
     T_RUN_OPEN              = 0.65   # mean extension — hand must be this open for runs to fire
     T_RUN_TIP_ARTIC         = 0.07   # m/s — tip_artic floor for runs (also when coming from chords)
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
@@ -214,9 +214,9 @@ class GestureDetector:
 
         tip_artic   — mean fingertip speed relative to its OWN MCP (m/s).
                        Pure finger articulation; used for run detection.
-        tip_disp    — mean peak-to-peak displacement of tips in wrist frame (m).
-                       Chord petting sweeps tips far from their resting position;
-                       individual finger strikes in runs stay local. Used for chord gate.
+        tip_disp    — peak-to-peak tip displacement normalised by wrist-to-MCP hand size.
+                       Dimensionless ratio, hand-size independent. Chord petting sweeps
+                       tips through a large arc (>1× hand size); runs stay local (<0.9×).
         mcp_speed   — speed of palm centroid in wrist-relative frame (m/s).
                        Palm pivot signal; used as the primary chord threshold.
         ext_change  — mean rate of change of finger extension ratios (1/s).
@@ -243,14 +243,15 @@ class GestureDetector:
         proj = (vel * pn_mid[:, None, :]).sum(axis=2)                   # (N-1, 5) signed
         tip_artic = float(np.abs(proj).mean())
 
-        # tip_disp — peak-to-peak range of each tip projected onto the palm normal.
-        # Using the palm-normal projection discounts horizontal wrist motion so that
-        # only the arc perpendicular to the palm (the chord petting direction) counts.
+        # tip_disp — peak-to-peak tip displacement normalised by wrist-to-MCP hand size.
+        # Dividing by hand size makes the threshold hand-size independent.
         tip_wr   = h[:, TIPS] - h[:, [0]]                        # (N, 5, 3)
-        pn_mean  = pn.mean(axis=0)                                # (3,) mean normal over window
+        pn_mean  = pn.mean(axis=0)
         pn_mean  = pn_mean / (np.linalg.norm(pn_mean) + 1e-6)
         proj_pos = (tip_wr * pn_mean[None, None, :]).sum(axis=2)  # (N, 5) scalar projection
-        tip_disp = float((proj_pos.max(axis=0) - proj_pos.min(axis=0)).mean())
+        tip_disp_m   = float((proj_pos.max(axis=0) - proj_pos.min(axis=0)).mean())
+        hand_size    = float(np.linalg.norm(h[:, MCPS4] - h[:, [0]], axis=2).mean())
+        tip_disp     = tip_disp_m / (hand_size + 1e-6)           # dimensionless ratio
 
         # mcp_speed — palm centroid in wrist-relative frame (chord pivot signal)
         mcp_wr = h[:, MCPS4] - h[:, [0]]         # (N, 4, 3)
