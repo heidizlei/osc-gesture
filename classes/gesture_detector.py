@@ -39,9 +39,10 @@ class GestureDetector:
     # Detection thresholds
     T_CHORD_MCP        = 0.10   # m/s — mcp_speed_wr floor for chords; filters rigid wrist
                            #     translation (no palm pivot → near-zero mcp_speed)
-    T_CHORD_TIP_DISP   = 0.08   # m   — tip displacement range in wrist frame, floor for chords
-    T_RUN_OPEN         = 0.65   # mean extension — hand must be this open for runs to fire
-    T_RUN_TIP_ARTIC    = 0.07   # m/s — palm-normal projected tip_artic floor for runs
+    T_CHORD_TIP_DISP        = 0.08   # m   — tip displacement floor for chords (default)
+    T_CHORD_TIP_DISP_IN_RUNS = 0.10  # m   — raised threshold when already in runs mode
+    T_RUN_OPEN              = 0.65   # mean extension — hand must be this open for runs to fire
+    T_RUN_TIP_ARTIC         = 0.07   # m/s — tip_artic floor for runs (also when coming from chords)
     T_RUN_EXT          = 0.40   # /s  — ext_change_rate floor for runs
     T_ROTATE      = 1.0    # rad/s
     T_INDEX_EXT   = 0.80   # extension ratio — index counts as "extended"
@@ -447,9 +448,11 @@ class GestureDetector:
                 continue
 
             # Chord: palm pivots (mcp_speed) AND tips sweep a large arc (tip_disp).
-            # The mcp_speed floor filters rigid wrist translation (vertical movement etc.)
-            # which produces tip_disp without any actual palm pivot.
-            is_chord = (feat['tip_disp']  >= self.T_CHORD_TIP_DISP and
+            # Raise the tip_disp threshold when already in runs to reduce spurious switching.
+            disp_thr = (self.T_CHORD_TIP_DISP_IN_RUNS
+                        if self._active_mode == 'runs'
+                        else self.T_CHORD_TIP_DISP)
+            is_chord = (feat['tip_disp']  >= disp_thr and
                         feat['mcp_speed'] >= self.T_CHORD_MCP)
             if is_chord:
                 intensity = float(np.clip(feat['mcp_speed'] / self.NORM_CHORD_MCP, 0.0, 1.0))
