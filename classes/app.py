@@ -1,4 +1,6 @@
 import time
+import os
+import sys
 import cv2
 import numpy as np
 from pythonosc import udp_client
@@ -6,6 +8,22 @@ from .tracker import HandTracker, HandLandmarkDrawer
 from .gesture_detector import GestureDetector
 from .gesture_sender import GestureSender
 import gc
+
+
+def _resource_path(relative_path):
+    """Resolve a path to a bundled resource.
+
+    Works both when running from source (resolves relative to the project
+    root) and when frozen into a PyInstaller onefile binary (resolves
+    relative to the temp extraction dir, sys._MEIPASS).
+    """
+    if os.path.isabs(relative_path):
+        return relative_path
+    base_path = getattr(sys, "_MEIPASS", None)
+    if base_path is None:
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
 
 _MODE_COLORS = {
     'noop':   (160, 160, 160),
@@ -17,13 +35,29 @@ _MODE_COLORS = {
 
 
 class OSCGestureApp:
+    # preset name -> (app_mode, baroque, tempo_enabled)
+    _PRESETS = {
+        'pedal-only': dict(app_mode='pause', baroque=False, tempo_enabled=False),
+        'range':      dict(app_mode='range', baroque=False, tempo_enabled=False),
+        'rc-slow':    dict(app_mode='tempo', baroque=True,  tempo_enabled=False),
+        'rc':         dict(app_mode='tempo', baroque=False, tempo_enabled=False),
+        'tempo':      dict(app_mode='tempo', baroque=False, tempo_enabled=True),
+    }
+    # keyboard key -> preset name (in the order the buttons were requested)
+    _PRESET_KEYS = {
+        ord('1'): 'pedal-only',
+        ord('2'): 'range',
+        ord('3'): 'rc-slow',
+        ord('4'): 'rc',
+        ord('5'): 'tempo',
+    }
+
     def __init__(self,
                  model_path="hand_landmarker.task",
                  camera_index=0,
                  ip="0.0.0.0",
                  port=9001,
-                 baroque=False,
-                 mode="tempo"):
+                 preset="pedal-only"):
         self.interval = (-8, 8)
 
         # OSC client
@@ -31,7 +65,7 @@ class OSCGestureApp:
 
         # Hand tracking
         self.hand_tracker = HandTracker(
-            model_path=model_path,
+            model_path=_resource_path(model_path),
             camera_index=camera_index,
             use_gpu=False   # GPU = leaks on macOS; CPU recommended
         )
@@ -54,13 +88,15 @@ class OSCGestureApp:
         self.last_osc_time = time.time()
         self.inactivity_message_sent = False
 
-        self.mode = mode   # 'pause', 'range', 'tempo'
-
         # Gesture detection + OSC sending
         self.gesture_detector = GestureDetector()
-        self.gesture_sender   = GestureSender(baroque=baroque)
+        self.gesture_sender   = GestureSender()
         self.gesture_result   = ('noop', 0.0)
         self.debug_mode       = False  # toggle with 'd' key
+
+        # Preset: 'pedal-only' | 'range' | 'rc-slow' | 'rc' | 'tempo'
+        # keys 1-5 switch presets live; sets self.mode/gesture_sender.baroque/enable_tempo
+        self._apply_preset(preset)
 
         # Hand presence tracking
         self.hand_present       = False
@@ -70,6 +106,20 @@ class OSCGestureApp:
 
         # Only top part of camera image is active for control
         self.active_area_ratio = 3 / 4
+
+
+    # ----------------------------
+    # Presets
+    # ----------------------------
+
+    def _apply_preset(self, name):
+        cfg = self._PRESETS[name]
+        self.preset = name
+        self.mode = cfg['app_mode']
+        self.gesture_sender.baroque      = bool(cfg['baroque'])
+        self.gesture_sender.enable_tempo = bool(cfg['tempo_enabled'])
+        print(f"Preset -> {name}  (mode={self.mode}, baroque={cfg['baroque']}, "
+              f"tempo={cfg['tempo_enabled']})")
 
 
     # ----------------------------
@@ -128,6 +178,20 @@ class OSCGestureApp:
         ty = th + 12
         cv2.rectangle(frame, (tx - 8, 4), (w - 4, ty + bl + 6), (255, 255, 255), -1)
         cv2.putText(frame, sent_label, (tx, ty), font, scale, sent_color, thick, cv2.LINE_AA)
+
+    def _draw_preset_hud(self, frame):
+        """Bottom-left legend showing the active preset and its key binding."""
+        h = frame.shape[0]
+        legend = "1 pedal-only  2 range  3 rc-slow  4 rc  5 tempo"
+        current = f"current: {self.preset}"
+        font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
+        (tw, th), bl = cv2.getTextSize(legend, font, scale, thick)
+        cv2.rectangle(frame, (14, h - th - bl - 34), (14 + tw + 12, h - 4),
+                      (255, 255, 255), -1)
+        cv2.putText(frame, legend, (20, h - th - 14), font, scale, (60, 60, 60),
+                    thick, cv2.LINE_AA)
+        cv2.putText(frame, current, (20, h - 12), font, scale, (0, 100, 0),
+                    thick, cv2.LINE_AA)
 
     def _draw_debug_hud(self, frame):
         """Overlay raw decision scores for each hand (toggle with 'd')."""
@@ -377,6 +441,7 @@ class OSCGestureApp:
                 if self.draw_landmarks:
                     annotated = HandLandmarkDrawer.draw_landmarks(annotated, results)
                 self._draw_gesture_hud(annotated, *self.gesture_result)
+                self._draw_preset_hud(annotated)
                 if self.debug_mode:
                     self._draw_debug_hud(annotated)
                 cv2.imshow("Hand Camera", annotated)
@@ -389,6 +454,8 @@ class OSCGestureApp:
                 elif key == ord('d'):
                     self.debug_mode = not self.debug_mode
                     print("Debug mode:", self.debug_mode)
+                elif key in self._PRESET_KEYS:
+                    self._apply_preset(self._PRESET_KEYS[key])
 
             if frame_counter % 300 == 0:
                 gc.collect()

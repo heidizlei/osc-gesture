@@ -28,6 +28,7 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
+.pyinstaller/
 *.manifest
 *.spec
 
