@@ -320,6 +320,14 @@ class OSCGestureApp:
         self._camera_lock  = threading.Lock()
         self._camera_cache = None
 
+        # Manual mode: the manual tab drives OSC by hand, so tracking stops
+        # and the camera is let go. Requested from the server thread, applied
+        # by the gesture loop -- same handoff as a camera switch, and for the
+        # same reason: the loop owns the capture device.
+        self._manual_lock    = threading.Lock()
+        self._manual_pending = None
+        self.manual_mode     = False
+
         self.fps = 0.0
         self._last_frame_time = None
         self._tint = None       # cached solid-colour buffer for the cv2 overlay
@@ -839,6 +847,13 @@ class OSCGestureApp:
         Returns (frame, results, active_hand_indices); frame is None when the
         camera gave us nothing this round.
         """
+        self._apply_pending_manual()
+        if self.manual_mode:
+            # Nothing to capture and nothing to detect. Without the pause the
+            # loop would spin a core doing exactly that.
+            time.sleep(0.1)
+            return None, None, []
+
         frame, results = self.hand_tracker.get_frame_and_landmarks(
             active_area_ratio=self.active_area_ratio)
         if frame is None:
@@ -1068,6 +1083,79 @@ class OSCGestureApp:
             })
         return bars
 
+    def request_manual_mode(self, manual):
+        """Ask to enter/leave manual mode; the gesture loop performs the swap.
+
+        Releasing the capture from the server thread would pull it out from
+        under a read in flight, so this only records the request.
+        """
+        manual = bool(manual)
+        with self._manual_lock:
+            self._manual_pending = manual
+        return manual
+
+    def manual_requested(self):
+        """Manual mode as last *asked for*, which is what the UI is told.
+
+        The gesture loop applies a request a beat after it is made, so
+        reporting the applied flag would answer a click with the state it
+        just replaced -- the page would see its own request contradicted and
+        flip back. Intent is the honest answer here; the camera catches up.
+        """
+        with self._manual_lock:
+            return self.manual_mode if self._manual_pending is None \
+                else self._manual_pending
+
+    def _apply_pending_manual(self):
+        """Enter or leave manual mode. Called from the gesture loop only."""
+        with self._manual_lock:
+            wanted = self._manual_pending
+            self._manual_pending = None
+        if wanted is None or wanted == self.manual_mode:
+            return
+        self.manual_mode = wanted
+        if wanted:
+            self.hand_tracker.release_camera()
+            self.hand_present = False
+            self.gesture_detector.reset()
+            self._publish_frame(None, None, [])
+            # Hand-absence may well have left the receiver paused, and in
+            # manual mode nothing is ever going to resume it -- every manual
+            # send would land on a paused receiver and look broken. Presence
+            # is a camera concept, so it goes away with the camera.
+            self.send_manual_pause(0)
+            self.last_hand_present = True
+            self.hand_absent_since = None
+            print("Manual mode: on (camera released)")
+        else:
+            self.hand_tracker.resume_camera()
+            # last_hand_present stays True, so the usual absence timer takes
+            # over from here and re-pauses if no hand comes back.
+            print("Manual mode: off")
+
+    def send_manual_osc(self, address, args):
+        """Send one OSC message on behalf of the manual tab.
+
+        Goes through the same client the gesture loop uses, so manual sends
+        appear in the OSC log next to everything else rather than in a
+        separate stream the page would have to merge.
+        """
+        if not isinstance(address, str) or not address.startswith('/'):
+            raise ValueError(f"bad OSC address: {address!r}")
+        if args is None:
+            args = []
+        if not isinstance(args, list):
+            raise ValueError("args must be a list")
+        for a in args:
+            if not isinstance(a, (int, float, str)) or isinstance(a, bool):
+                raise ValueError(f"unsupported OSC argument: {a!r}")
+        try:
+            self.osc_client.send_message(address, args)
+        except Exception as e:
+            print(f"OSC send failed: {address} {args}: {e}")
+            raise ValueError(f"send failed: {e}")
+        return {'sent': address, 'args': args}
+
     def camera_options(self, refresh=False):
         """Cameras the web UI can offer, plus which one is live.
 
@@ -1121,6 +1209,7 @@ class OSCGestureApp:
             'osc_seq':        osc_seq,
             'camera':           self.hand_tracker.camera_index,
             'camera_error':     self.hand_tracker.camera_error,
+            'manual':           self.manual_requested(),
             'orchestra':        self.orchestra_mode,
             'piano_only':       self.piano_only,
             'orchestra_split':  round(self._orchestra_split_y(), 4),
@@ -1169,6 +1258,8 @@ class OSCGestureApp:
             if index < 0:
                 raise ValueError(f"bad camera index: {index}")
             self.hand_tracker.request_camera(index)
+        if 'manual' in payload:
+            self.request_manual_mode(payload['manual'])
         if 'orchestra' in payload:
             self._set_orchestra_mode(bool(payload['orchestra']))
         if 'piano_only' in payload:

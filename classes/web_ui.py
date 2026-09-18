@@ -90,7 +90,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, 404)
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/control":
+        path = self.path.split("?", 1)[0]
+        if path not in ("/control", "/osc"):
             self._send_json({"error": "not found"}, 404)
             return
         try:
@@ -102,7 +103,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"bad request: {e}"}, 400)
             return
         try:
-            self._send_json(self.app.apply_control(payload))
+            if path == "/osc":
+                # The manual tab's own address/args, sent verbatim. Separate
+                # from /control because that one names app state, while this
+                # is a passthrough the app doesn't interpret.
+                self._send_json(self.app.send_manual_osc(
+                    payload.get("address"), payload.get("args")))
+            else:
+                self._send_json(self.app.apply_control(payload))
         except ValueError as e:
             self._send_json({"error": str(e)}, 400)
 

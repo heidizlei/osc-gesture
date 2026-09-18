@@ -146,6 +146,32 @@ class HandTracker:
         time.sleep(1.0)
         return self.cap.open(self.camera_index)
 
+    def release_camera(self):
+        """Let go of the capture device. Called from the gesture loop only.
+
+        The manual tab drives OSC by hand and never looks at the camera, so
+        holding the device open there would keep the recording light on and
+        keep the camera unavailable to everything else for no reason.
+        """
+        if self.cap is not None:
+            self.cap.release()
+
+    def resume_camera(self):
+        """Re-open the device released by release_camera(); gesture loop only.
+
+        Returns whether the camera is open. A failure is recorded for the web
+        UI rather than raised: the camera may have been taken by another app
+        while the manual tab was up, and the loop keeps running either way.
+        """
+        if self.cap is not None and self.cap.isOpened():
+            return True
+        if self.cap.open(self.camera_index):
+            self.camera_error = None
+            return True
+        self.camera_error = f"camera {self.camera_index} would not reopen"
+        print("Camera resume failed:", self.camera_error)
+        return False
+
     def request_camera(self, index):
         """Ask for a different camera; the gesture loop performs the swap.
 

@@ -31,7 +31,10 @@ python main.py --host <ip> --port <port>
 ### Web UI (default)
 
 On startup the app serves `ui.html` at `http://127.0.0.1:8765` and opens it in
-your browser. The main row is three columns:
+your browser. Two tabs in the header pick what the page drives: **Gesture**
+(below) and **Manual**, which is the hand-driven OSC controller.
+
+The gesture tab's main row is three columns:
 
 | Column | Contents |
 |---|---|
@@ -123,6 +126,43 @@ to anyone on that network — use it on a trusted one.
 
 The browser keeps the same keyboard shortcuts as the OpenCV window: `1`–`5` for
 presets, `l` for landmarks, `d` for the debug panel.
+
+### Manual tab
+
+The second tab drives the same OSC target by hand, with no camera in the
+loop: a pitch-range slider, runs and chords buttons, and tempo multipliers.
+It's the controller that `web_controller.py` serves standalone, moved into
+the app so there's one page and one port rather than two servers to start.
+
+Opening it **stops tracking and releases the camera** (the recording light
+goes off, and the device is free for anything else). That isn't only tidiness
+— in most presets the gesture loop sends `/setOutputRange` continuously, so a
+running camera would overwrite the slider under your hand. The header's fps
+readout reads `camera off` while the tab is up. Switching back re-opens the
+camera; if something else claimed it meanwhile, the failure is reported next
+to the camera picker and the loop keeps running.
+
+Hand-absence may well have left the receiver paused, and in manual mode
+nothing is going to resume it — every send would land on a paused receiver.
+So entering the tab sends `/setManualPause 0` once. Leaving it hands presence
+back to the gesture loop, which re-pauses on its usual absence timer.
+
+Manual sends go out through the same OSC client the gesture loop uses, so
+they appear in the OSC log with everything else. The log element itself is
+moved between the two tabs rather than duplicated, so there's one stream and
+one scroll position.
+
+| Control | Message |
+|---|---|
+| Drag a handle | `/setOutputRange lo1 hi1 lo2 hi2`, throttled to one send per 500 ms |
+| Double-click the track | Links both handles into one, and again to split them |
+| ± semitones | Half-width of each handle's band, 1–36 |
+| Runs / chords | `/playRuns <level>`, `/playChords <level>` |
+| Reset | `/resetControl` |
+| Tempo ×N | `/adjustTempo <ratio>`, preceded by `/resetControl` if runs or chords are latched |
+
+Nothing is sent on opening the tab or loading the page — the slider states
+its position only once you move it.
 
 ### Why the web UI is the default
 
@@ -359,10 +399,20 @@ detector/sender, useful for testing detection logic without a camera.
 python web_controller.py --host <ip> --port <port> [--http-port 8080]
 ```
 
-Serves `controller.html`, a browser-based manual OSC controller that forwards
-button/slider input as OSC UDP messages (no camera/gesture detection). This is
-separate from `main.py --ui web`, which does run the camera and gesture
-detection.
+Serves a browser-based manual OSC controller that forwards button/slider
+input as OSC UDP messages, with no camera or gesture detection. The same
+controls are built into the main app as its **Manual tab**, which is the
+usual way in; this script stays for running the controller on its own, on a
+machine with no camera or without starting MediaPipe at all.
+
+Two things to know if you edit it:
+
+- The page it serves is the `HTML` constant in the script. The
+  `controller.html` written beside it is a copy for editing convenience —
+  rewritten from that constant on every run, and never read back, so edits to
+  the file are discarded.
+- `--http-port` defaults to `8765`, the same port `main.py` serves the web UI
+  on. Pass a different one if both are running.
 
 
 ## Packaging
