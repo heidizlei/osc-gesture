@@ -33,10 +33,11 @@ def _resource_path(relative_path):
 # these rather than of all 21 landmarks.
 _TIP_LANDMARKS = (4, 8, 12, 16, 20)
 
-# Region -> the instrument argument sent as /setOutputRange's first value,
-# which is also the zero-based index of that instrument in an orchestra
-# preset's "outputInstruments" list. Change this one mapping to re-assign
-# which preset instrument a region drives.
+# Region -> the zero-based index of the instrument it drives in an orchestra
+# preset's "outputInstruments" list. The instrument argument sent with
+# /setOutputRange is that entry's `id` (the token instrument JordanAI keys its
+# output instruments by: 1 grand piano, 48 strings, 61 brass), never the index.
+# Change this one mapping to re-assign which preset instrument a region drives.
 _REGION_INSTRUMENT = {
     'piano':   0,
     'strings': 1,
@@ -57,11 +58,11 @@ _ORCHESTRA_PRESET = "orchestra.json"
 
 
 def _load_instrument_defaults(preset_path=None):
-    """Map zero-based instrument index -> (low, high) from an orchestra preset.
+    """Map zero-based instrument index -> (id, low, high) from an orchestra preset.
 
     Reads "outputInstruments" out of a preset JSON file so a region's reset
-    range matches whatever the receiving app is configured for. Falls back to
-    _DEFAULT_INSTRUMENTS when there's no readable preset.
+    range and instrument id match whatever the receiving app is configured
+    for. Falls back to _DEFAULT_INSTRUMENTS when there's no readable preset.
     """
     instruments = _DEFAULT_INSTRUMENTS
     path = preset_path or _resource_path(_ORCHESTRA_PRESET)
@@ -82,7 +83,7 @@ def _load_instrument_defaults(preset_path=None):
     ranges = {}
     for index, inst in enumerate(instruments):
         try:
-            ranges[index] = (int(inst['low']), int(inst['high']))
+            ranges[index] = (int(inst['id']), int(inst['low']), int(inst['high']))
         except (KeyError, TypeError, ValueError):
             continue
     return ranges
@@ -544,7 +545,17 @@ class OSCGestureApp:
     # OSC sending
     # ----------------------------
 
+    def _instrument_id(self, region):
+        """The preset id of the instrument a region drives, or None when the
+        preset has no entry at that index."""
+        default = self._instr_defaults.get(_REGION_INSTRUMENT[region])
+        return default[0] if default else None
+
     def send_osc_message(self, left_val=None, right_val=None):
+        """The piano's range, both hands. Outside orchestra mode the four-argument
+        form: JordanAI applies it to its first active instrument, whatever id
+        the preset gives it. In orchestra mode the piano's id leads, so the
+        message can never land on another instrument."""
         if self.mode == 'pause':
             return
         if left_val == -1 and right_val == -1:
@@ -558,9 +569,15 @@ class OSCGestureApp:
             arg3 = right_val + self.interval[0]
             arg4 = right_val + self.interval[1]
 
+        args = [arg1, arg2, arg3, arg4]
+        if self.orchestra_mode:
+            piano_id = self._instrument_id('piano')
+            if piano_id is None:
+                return
+            args = [piano_id] + args
         try:
-            self.osc_client.send_message("/setOutputRange", [arg1, arg2, arg3, arg4])
-            print(f"OSC → /setOutputRange {arg1} {arg2} {arg3} {arg4}")
+            self.osc_client.send_message("/setOutputRange", args)
+            print("OSC → /setOutputRange " + " ".join(str(a) for a in args))
         except Exception as e:
             print("OSC send error:", e)
 
@@ -573,25 +590,31 @@ class OSCGestureApp:
             print("OSC send error:", e)
 
     def send_instrument_range(self, instr, lo, hi):
-        """Orchestra-mode range for one instrument: instr, lo, hi, -1, -1."""
+        """Orchestra-mode range for one instrument: id, lo, hi, -1, -1."""
         if self.mode == 'pause':
             return
-        self._send_range([_REGION_INSTRUMENT[instr], lo, hi, -1, -1], instr)
+        instrument_id = self._instrument_id(instr)
+        if instrument_id is None:
+            return
+        self._send_range([instrument_id, lo, hi, -1, -1], instr)
 
     def send_region_reset(self, region):
         """Reset one region's instrument to its preset default range.
 
-        The piano keeps the plain four-argument form; the other regions carry
-        their instrument argument, matching how their live updates are sent.
+        Outside orchestra mode the piano keeps the plain four-argument form;
+        in orchestra mode every region carries its instrument id, matching
+        how the live updates are sent.
         """
         if self.mode == 'pause':
             return
-        index = _REGION_INSTRUMENT[region]
-        default = self._instr_defaults.get(index)
+        default = self._instr_defaults.get(_REGION_INSTRUMENT[region])
         if default is None:
             return
-        lo, hi = default
-        args = [lo, hi, -1, -1] if region == 'piano' else [index, lo, hi, -1, -1]
+        instrument_id, lo, hi = default
+        if region == 'piano' and not self.orchestra_mode:
+            args = [lo, hi, -1, -1]
+        else:
+            args = [instrument_id, lo, hi, -1, -1]
         self._send_range(args, f"{region} reset")
 
     def send_manual_pause(self, pause_flag):

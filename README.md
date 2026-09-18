@@ -155,9 +155,15 @@ of the active region, so it stays valid when you move the exclusion boundary.
 
 | Zone | Message |
 |---|---|
-| Piano | `/setOutputRange lo hi lo2 hi2` — the original four-argument form |
-| Strings | `/setOutputRange 1 lo hi -1 -1` |
-| Brass | `/setOutputRange 2 lo hi -1 -1` |
+| Piano | `/setOutputRange 1 lo hi lo2 hi2` — the four-argument form led by the piano's id |
+| Strings | `/setOutputRange 48 lo hi -1 -1` |
+| Brass | `/setOutputRange 61 lo hi -1 -1` |
+
+The first argument is the instrument's `id` from the preset (the token instrument
+JordanAI keys its output instruments by), not its position in the list: JordanAI
+looks the number up as an id, so an index would have moved the piano (id 1) and
+ignored the brass. Outside orchestra mode the piano keeps the plain four-argument
+form, which JordanAI applies to its first active instrument whatever its id.
 
 Each zone's range is driven by the hands currently inside it, independently of
 the others. Two hands in the same zone collapse to one message at their mean x.
@@ -181,9 +187,9 @@ empty frame — and it clears that zone's send throttle so returning a hand to
 the same spot re-sends immediately.
 
 Defaults come from an orchestra preset's `outputInstruments` list, indexed by
-the same zero-based number that's sent as the instrument argument. The entry
-`id`s are General MIDI programs, which is what fixes the order — 1 is grand
-piano, 48 string ensemble, 61 brass section:
+the zone's zero-based position (`_REGION_INSTRUMENT`); the entry's `id` is what
+goes on the wire. The `id`s are General MIDI programs, which is what fixes the
+order — 1 is grand piano, 48 string ensemble, 61 brass section:
 
 | Zone | Index | Preset entry | Default range |
 |---|---|---|---|
@@ -192,8 +198,7 @@ piano, 48 string ensemble, 61 brass section:
 | Brass | 2 | `outputInstruments[2]`, `id: 61` (brass section) | 36–92 |
 
 (The ranges shown are from the preset this was built against; the app reads
-whatever your preset has.) The piano's live updates use the four-argument form
-with no index, so index 0 only ever appears in a reset.
+whatever your preset has, ids included.)
 
 Point the app at a preset with `--orchestra-preset path/to/orchestra.json`;
 without it, the app looks for `orchestra.json` beside itself and otherwise
