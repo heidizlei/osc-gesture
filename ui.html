@@ -139,8 +139,7 @@
   /* ---- orchestra-mode dividers ---- */
   #regions { position: absolute; inset: 0; pointer-events: none; }
   #regions[hidden] { display: none; }
-  #splitBar, #colBar { position: absolute; background: #fb3; }
-  #splitBar { left: 0; right: 0; height: 2px; }
+  #splitBar { position: absolute; background: #fb3; left: 0; right: 0; height: 2px; }
   #splitBar::after {
     content: "";
     position: absolute; top: -2px; left: 50%;
@@ -148,15 +147,7 @@
     width: 54px; height: 6px;
     border-radius: 3px; background: #fb3;
   }
-  #colBar { top: 0; width: 2px; }
-  #colBar::after {
-    content: "";
-    position: absolute; left: -2px; top: 50%;
-    transform: translateY(-50%);
-    width: 6px; height: 44px;
-    border-radius: 3px; background: #fb3;
-  }
-  #stage.drag-split #splitBar, #stage.drag-column #colBar {
+  #stage.drag-split #splitBar {
     background: #fd6;
     box-shadow: 0 0 8px rgba(255, 187, 51, 0.9);
   }
@@ -310,6 +301,30 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* ---- per-instrument range bars ----
+     Each row takes its instrument's colour from the OSC log, so a bar and
+     the messages that moved it read as the same thing. */
+  .rangebars { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
+  .rb-row { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 8px;
+            align-items: center; }
+  .rb-name { font-size: 0.68rem; color: var(--dim); text-align: right;
+             overflow: hidden; text-overflow: ellipsis; }
+  .rb-track { position: relative; height: 13px; border-radius: 3px;
+              background: #191919; overflow: hidden; }
+  .rb-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: #2c2c2c; }
+  .rb-span { position: absolute; top: 2px; bottom: 2px; border-radius: 2px;
+             background: currentColor; transition: left 0.08s linear, width 0.08s linear; }
+  /* Parked at its preset default: a thin dim line, so a live instrument is
+     the only thing that reads as solid. */
+  .rb-row.idle .rb-span { top: 5px; bottom: 5px; opacity: 0.25; }
+  /* Not in the active list — piano-only excludes it, so it can't sound. */
+  .rb-row.off { opacity: 0.28; }
+  .rb-row.off .rb-name { text-decoration: line-through; }
+  .rb-axis { margin-top: 1px; }
+  .rb-scale { position: relative; height: 10px; }
+  .rb-scale span { position: absolute; top: 0; transform: translateX(-50%);
+                   font-size: 0.6rem; color: #5a5a5a; }
+
   /* ---- toggles (stacked, they live in the narrow left column) ---- */
   .toggles { display: flex; flex-direction: column; gap: 10px; }
   .toggles label {
@@ -399,16 +414,15 @@
       <canvas id="lm"></canvas>
       <div id="excl"><span id="exclLabel"></span></div>
       <div id="regions" hidden>
-        <div id="colBar"></div>
         <div id="splitBar"></div>
-        <div class="rlabel" id="labBrass">brass</div>
-        <div class="rlabel" id="labStrings">strings</div>
+        <div class="rlabel" id="labBrass">brass · left hand</div>
+        <div class="rlabel" id="labStrings">strings · right hand</div>
         <div class="rlabel" id="labPiano">piano</div>
       </div>
     </div>
     <p class="hint" id="stageHint">Drag the red region to move the exclusion boundary. In
-       orchestra mode, drag the amber bars to move the piano split and the
-       brass/strings divide.</p>
+       orchestra mode, drag the amber bar to move the piano split; above it
+       the left hand plays brass and the right strings.</p>
   </section>
 
   <section>
@@ -420,6 +434,7 @@
         <span id="sent">none</span>
       </div>
       <div class="bar"><div id="intensityBar"></div></div>
+      <div class="rangebars" id="rangeBars"></div>
       <div class="range-info" id="rangeInfo"></div>
     </div>
     <div class="log-head" id="logHead">
@@ -467,6 +482,7 @@ const MAX_LOG_ROWS = 40;      // matches the server's buffer cap
 const OSC_COLORS = {
   "/setManualPause":      "#e0864f",
   "/setForcedInstruments": "#8fd6a0",
+  "/setActiveInstruments": "#5fae8f",
   "/playRuns":            "#50c850",
   "/playChords":          "#50c8c8",
   "/adjustTempo":         "#c8c850",
@@ -616,9 +632,8 @@ $("oscClear").addEventListener("click", async () => {
 const HANDLE_PX = 12;
 // handle id -> the /control key that commits it
 const HANDLE_KEY = {
-  excl:   "active_area",
-  split:  "orchestra_split",
-  column: "orchestra_column",
+  excl:  "active_area",
+  split: "orchestra_split",
 };
 
 // Non-null while a bar is being dragged: { id, value }. Its value overrides
@@ -634,7 +649,6 @@ function geom() {
   return {
     excl:      pick("excl", 0.75),
     split:     pick("split", 0.375),
-    column:    pick("column", 0.5),
     orchestra: !!s.orchestra,
   };
 }
@@ -649,14 +663,13 @@ function renderGeometry() {
   if (!g.orchestra) return;
 
   const splitPct = g.split * 100;
-  const colPct = g.column * 100;
   $("splitBar").style.top = splitPct + "%";
-  $("colBar").style.left = colPct + "%";
-  $("colBar").style.height = splitPct + "%";
 
-  // brass / strings sit just above the split bar, piano just below it.
+  // brass / strings sit just above the split bar, piano just below it. They
+  // sit at the frame edges as a reminder of which hand plays which, not as
+  // a boundary: the hands can cross without swapping instruments.
   $("labBrass").style.cssText   = `left:8px; top:calc(${splitPct}% - 19px)`;
-  $("labStrings").style.cssText = `left:calc(${colPct}% + 8px); top:calc(${splitPct}% - 19px)`;
+  $("labStrings").style.cssText = `right:8px; top:calc(${splitPct}% - 19px)`;
   $("labPiano").style.cssText   = `left:8px; top:calc(${splitPct}% + 6px)`;
 
   const live = new Set(state?.active_regions || []);
@@ -669,7 +682,7 @@ function renderGeometry() {
 function hitTest(e) {
   const r = stage.getBoundingClientRect();
   if (!r.width || !r.height) return null;
-  const x = e.clientX - r.left, y = e.clientY - r.top;
+  const y = e.clientY - r.top;
   const g = geom();
   const cands = [];
 
@@ -679,12 +692,8 @@ function hitTest(e) {
 
   if (g.orchestra) {
     const splitY = g.split * r.height;
-    const colX = g.column * r.width;
     if (Math.abs(y - splitY) <= HANDLE_PX)
       cands.push({ id: "split", d: Math.abs(y - splitY) });
-    // The column bar only exists above the split.
-    if (y < splitY + HANDLE_PX && Math.abs(x - colX) <= HANDLE_PX)
-      cands.push({ id: "column", d: Math.abs(x - colX) });
   }
 
   if (!cands.length) return null;
@@ -694,7 +703,6 @@ function hitTest(e) {
 
 function valueFromPointer(id, e) {
   const r = stage.getBoundingClientRect();
-  if (id === "column") return clamp((e.clientX - r.left) / r.width, 0.05, 0.95);
   const y = (e.clientY - r.top) / r.height;
   if (id === "excl") return clamp(y, 0.10, 0.95);
   // The server stores the split as a fraction of the active region and clamps
@@ -716,7 +724,7 @@ stage.addEventListener("pointerdown", (e) => {
 stage.addEventListener("pointermove", (e) => {
   if (!drag) {
     const id = hitTest(e);
-    stage.style.cursor = !id ? "default" : id === "column" ? "ew-resize" : "ns-resize";
+    stage.style.cursor = id ? "ns-resize" : "default";
     return;
   }
   drag.value = valueFromPointer(drag.id, e);
@@ -728,7 +736,7 @@ function endDrag() {
   if (!drag) return;
   const { id, value } = drag;
   drag = null;
-  stage.classList.remove("drag-excl", "drag-split", "drag-column");
+  stage.classList.remove("drag-excl", "drag-split");
   send({ [HANDLE_KEY[id]]: value });
 }
 stage.addEventListener("pointerup", endDrag);
@@ -843,6 +851,97 @@ function renderDebug(scores, T) {
   }).join("");
 }
 
+// ---------------------------------------------------------- range bars
+
+// Rows are rebuilt only when the instrument set changes — orchestra mode
+// adding or removing brass and strings — so the spans can animate between
+// polls instead of being replaced ten times a second.
+let rbRows = new Map();        // instrument -> { row, track, spans: [div] }
+let rbSig  = null;
+
+const pitchPct = (v, lo, hi) => ((v - lo) / (hi - lo)) * 100;
+
+function buildRangeBars(entries, lo, hi) {
+  const host = $("rangeBars");
+  host.innerHTML = "";
+  rbRows = new Map();
+  const octaves = [];
+  for (let midi = Math.ceil(lo / 12) * 12; midi <= hi; midi += 12) octaves.push(midi);
+
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "rb-row";
+    row.style.color = RANGE_COLORS[e.id] || OSC_FALLBACK;
+
+    const name = document.createElement("div");
+    name.className = "rb-name";
+    name.textContent = e.instr;
+
+    const track = document.createElement("div");
+    track.className = "rb-track";
+    for (const midi of octaves) {
+      const tick = document.createElement("div");
+      tick.className = "rb-tick";
+      tick.style.left = pitchPct(midi, lo, hi) + "%";
+      track.appendChild(tick);
+    }
+
+    row.append(name, track);
+    host.appendChild(row);
+    rbRows.set(e.instr, { row, track, spans: [] });
+  }
+
+  // Octave numbers under the tracks, every other one so they don't collide.
+  const axis = document.createElement("div");
+  axis.className = "rb-row rb-axis";
+  const scale = document.createElement("div");
+  scale.className = "rb-scale";
+  for (const midi of octaves) {
+    if ((midi / 12) % 2) continue;
+    const tag = document.createElement("span");
+    tag.style.left = pitchPct(midi, lo, hi) + "%";
+    tag.textContent = midi;
+    scale.appendChild(tag);
+  }
+  axis.append(document.createElement("div"), scale);
+  host.appendChild(axis);
+}
+
+function renderRanges(s) {
+  const entries = s.ranges || [];
+  const [lo, hi] = s.pitch_bounds || [0, 127];
+  if (!entries.length || hi <= lo) { $("rangeBars").innerHTML = ""; rbSig = null; return; }
+
+  const sig = entries.map((e) => `${e.instr}:${e.id}`).join(",") + `|${lo}-${hi}`;
+  if (sig !== rbSig) { buildRangeBars(entries, lo, hi); rbSig = sig; }
+
+  for (const e of entries) {
+    const r = rbRows.get(e.instr);
+    if (!r) continue;
+    r.row.classList.toggle("idle", !e.live);
+    r.row.classList.toggle("off", !e.active);
+
+    while (r.spans.length < e.spans.length) {
+      const bar = document.createElement("div");
+      bar.className = "rb-span";
+      r.track.appendChild(bar);
+      r.spans.push(bar);
+    }
+    r.spans.forEach((bar, i) => {
+      const span = e.spans[i];
+      bar.hidden = !span;
+      if (!span) return;
+      const left = pitchPct(span[0], lo, hi);
+      bar.style.left = left + "%";
+      bar.style.width = Math.max(0.8, pitchPct(span[1], lo, hi) - left) + "%";
+    });
+
+    const where = e.spans.map((sp) => sp.join("–")).join("  ") || "—";
+    r.row.title = `${e.instr} (id ${e.id}) ${where}` +
+      (e.active ? (e.live ? "" : "  · parked at default") : "  · not active");
+  }
+}
+
 // ---------------------------------------------------------------- state
 
 function apply(s, opts = {}) {
@@ -882,6 +981,8 @@ function apply(s, opts = {}) {
   if ($("pianoOnly") !== document.activeElement) $("pianoOnly").checked = s.piano_only;
   $("pianoOnly").disabled = !s.orchestra;
   $("pianoOnlyRow").classList.toggle("off", !s.orchestra);
+
+  renderRanges(s);
 
   $("debugPanel").classList.toggle("on", s.debug);
   if (s.debug) renderDebug(s.debug_scores, s.thresholds);

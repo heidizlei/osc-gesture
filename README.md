@@ -36,11 +36,30 @@ your browser. The main row is three columns:
 | Column | Contents |
 |---|---|
 | Left | Preset buttons (`1`–`5`), orchestra (`o`) and piano-only (`p`) toggles, landmark/debug toggles |
-| Centre | Camera preview with the draggable region dividers |
-| Right | Gesture readout on top, live OSC log below |
+| Centre | Camera preview with the draggable piano split and exclusion boundary |
+| Right | Gesture readout and range bars on top, live OSC log below |
 
 The debug-score panel sits full-width underneath. On a narrow screen the three
 columns stack.
+
+### Range bars
+
+Under the gesture readout, one bar per instrument shows where its pitch range
+currently sits, on a fixed axis spanning the whole reachable range (ticks and
+numbers are MIDI note numbers, one per octave). Each bar takes its
+instrument's colour from the OSC log, so a bar and the messages that moved it
+read as the same thing.
+
+| Bar | Meaning |
+|---|---|
+| Solid | A hand is in that zone right now, driving the range |
+| Thin dim line | No hand: the instrument is parked at the preset default it was reset to |
+| Row dimmed, name struck through | Not in the active list — piano-only excludes it, so it can't sound |
+
+The piano draws two bars when two hands are on it, one when a single hand is
+(the second slot goes out as `-1 -1`, so there's nothing to draw). Outside
+orchestra mode only the piano row exists. Hovering a row gives the exact
+numbers, and the text line underneath keeps the piano's `L`/`R` readout.
 
 ### OSC log
 
@@ -136,10 +155,10 @@ Toggle it with the first checkbox under the presets, or the `o` key. It splits
 the active region into three instrument zones:
 
 ```
-┌─────────────────┬─────────────────┐
-│     BRASS       │    STRINGS      │   ← top half, split by a vertical bar
-│   (instr 61)    │   (instr 48)    │      (both bars draggable)
-├─────────────────┴─────────────────┤   ← horizontal bar (draggable)
+┌───────────────────────────────────┐
+│   BRASS ← left hand               │   ← top half, no divider: the zone
+│           right hand → STRINGS    │      is the hand, not the side
+├───────────────────────────────────┤   ← horizontal bar (draggable)
 │              PIANO                │   ← bottom half
 │           (4-arg form)            │
 ├───────────────────────────────────┤   ← exclusion boundary (draggable)
@@ -147,9 +166,23 @@ the active region into three instrument zones:
 └───────────────────────────────────┘
 ```
 
-Both amber dividers are draggable, as is the exclusion boundary. The nearest
-bar wins when two are close together. The piano split is stored as a fraction
-of the active region, so it stays valid when you move the exclusion boundary.
+Above the piano split there's no left/right boundary: **the left hand plays
+brass and the right hand plays strings**, wherever each one is. The hands can
+cross over without swapping instruments, and either can reach the full pitch
+range.
+
+This uses MediaPipe's handedness classification. Its raw label is the
+opposite of the hand you're actually using here — it assumes a mirrored
+image and the tracker already flips the camera frame
+([`tracker.py`](classes/tracker.py)), so the two mirrorings cancel — and
+`_handedness` in `classes/app.py` swaps it back. That swap was settled
+against the live camera, so if a future MediaPipe changes the convention,
+that's the one line to flip. A hand it can't label — vanishingly rare —
+falls back to the frame halves, brass left, strings right.
+
+The amber piano split is draggable, as is the exclusion boundary. The split is
+stored as a fraction of the active region, so it stays valid when you move the
+exclusion boundary.
 
 ### Messages
 
@@ -163,59 +196,69 @@ The leading argument is the zone's **General MIDI program** — 48 string
 ensemble, 61 brass section — read from the preset entry the zone maps to, so
 pointing the app at a different preset changes the ids it sends.
 
-Each zone's range is driven by the hands currently inside it, independently of
-the others. Two hands in the same zone collapse to one message at their mean x.
-The piano keeps its original behaviour: one hand drives both channels, two
-hands drive left and right separately.
+Each zone's range is driven by the hands currently in it, independently of the
+others. Two hands in the same zone collapse to one message at their mean x —
+which above the split only happens when MediaPipe labels both the same. The
+piano keeps its original behaviour: one hand drives both channels, two hands
+drive left and right separately.
 
 Hand position is the **centroid of the five finger-tip landmarks** (4, 8, 12,
-16, 20). That's used for every position decision — which zone a hand is in,
-the pitch mapping, and whether a hand is inside the active area at all.
+16, 20). That's used for whether a hand is above the piano split, for the
+pitch mapping, and for whether it's inside the active area at all — but no
+longer for brass vs strings.
 
-`x` maps across the whole frame rather than across each column, so each column
-reaches only its own half of the pitch range: brass the lower half, strings the
-upper.
+`x` maps across the whole frame, so brass and strings each reach the whole
+pitch range rather than half of it.
 
 ### Forced instruments
 
 Alongside the range messages, `/setForcedInstruments` carries the ids of the
-zones that currently hold a hand, so an instrument is only forced on while a
-hand is in its zone:
+**brass and strings** zones that currently hold a hand, so one of those
+instruments is forced on only while a hand is in its zone:
 
 | Occupied zones | Message |
 |---|---|
 | Strings | `/setForcedInstruments 48` |
 | Strings + brass | `/setForcedInstruments 48 61` |
-| Piano | `/setForcedInstruments 1` |
-| None | `/setForcedInstruments` — no arguments, clearing the list |
+| Neither (whatever the piano zone holds) | `/setForcedInstruments` — no arguments, clearing the list |
+
+The piano is never forced: it's the instrument playing underneath, so this
+list is what a hand brings in over it. A hand entering or leaving the piano
+zone therefore sends nothing.
 
 It's edge-triggered on the same per-zone engagement the resets use: one
 message when the set of occupied zones changes, none while it holds steady. A
-hand crossing from one zone to another is a single message with the new list,
+hand crossing from brass to strings is a single message with the new list,
 not a remove followed by an add. Ids come from the preset, same as the range
 messages.
 
-Orchestra mode only. Outside it every hand lands in the piano zone, so
-forcing would just mirror hand presence — leaving orchestra mode sends the
-empty list, and re-entering it states the current zones.
+Orchestra mode only — outside it the brass and strings zones don't exist, so
+leaving orchestra mode sends the empty list and re-entering it states the
+current zones.
 
 #### Piano-only
 
-The **piano-only** checkbox (or the `p` key) keeps the piano forced on
-regardless of where the hands are, with brass and strings joining it while
-their zones are occupied:
+The **piano-only** checkbox (or the `p` key) narrows `/setActiveInstruments`
+to the piano plus whichever of brass and strings a hand is in, so nothing
+else can sound:
 
-| Occupied zones | Message |
+| State | `/setActiveInstruments` |
 |---|---|
-| None, or piano only | `/setForcedInstruments 1` |
-| Strings | `/setForcedInstruments 1 48` |
-| Strings + brass | `/setForcedInstruments 1 48 61` |
+| Piano-only off | `1 48 61` — all three enabled |
+| Piano-only, no hand in brass/strings | `1` |
+| Piano-only, hand in strings | `1 48` |
+| Piano-only, hands in strings + brass | `1 48 61` |
 
-So the list is never empty while it's on, and a hand entering or leaving the
-piano zone sends nothing — the piano is already in the list. It only applies
-inside orchestra mode (the checkbox is disabled outside it), and toggling it
-re-sends the list immediately. With it off, the list is exactly the occupied
-zones, as above.
+It leaves `/setForcedInstruments` alone — that stays exactly the occupied
+brass/strings zones, in both modes. The active list is sent just before the
+forced one, so an instrument is enabled before it's forced, and only when the
+set changes.
+
+Piano-only applies inside orchestra mode only (the checkbox is disabled
+outside it), and toggling it re-sends immediately. Turning it off — or
+leaving orchestra mode while it's on — re-enables all three, so the receiver
+is never left narrowed. The app assumes it starts with all three enabled and
+so sends nothing on that address until piano-only first narrows the set.
 
 ### Zone resets
 

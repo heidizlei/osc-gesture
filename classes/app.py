@@ -55,6 +55,15 @@ _DEFAULT_INSTRUMENTS = [
 
 _ORCHESTRA_PRESET = "orchestra.json"
 
+# Where the brass/strings half is split for a hand MediaPipe couldn't label
+# left or right. Handedness decides the zone in every other case, so this is
+# only a fallback and isn't adjustable.
+_UNLABELLED_HAND_SPLIT = 0.5
+
+# Row order for the web UI's range bars. Piano leads so its row doesn't move
+# when orchestra mode adds and removes the other two.
+_RANGE_BAR_ORDER = ('piano', 'brass', 'strings')
+
 
 def _load_instrument_defaults(preset_path=None):
     """Map instrument index -> (midi_id, low, high) from an orchestra preset.
@@ -256,13 +265,12 @@ class OSCGestureApp:
         self.PAUSE_ABSENT_S     = 0.5    # seconds of sustained absence before sending pause
 
         # Orchestra mode: the active region splits into a piano half (bottom)
-        # and a brass/strings half (top), divided again into two columns.
+        # and a brass/strings half (top), where the left hand plays brass and
+        # the right strings.
         self.orchestra_mode = False
         # Fraction of the active region, so the divider stays valid when the
         # exclusion boundary moves. Above it = brass/strings, below = piano.
         self.orchestra_split_ratio = 0.5
-        # Frame x dividing brass (left) from strings (right).
-        self.orchestra_column_ratio = 0.5
         # Piano-only: the piano is forced on whatever the hands are doing, and
         # a hand in brass or strings adds its instrument alongside it, instead
         # of the forced list being exactly the occupied zones.
@@ -274,9 +282,13 @@ class OSCGestureApp:
         # Per-region "a hand was here last frame", so a reset fires on the
         # transition to empty rather than on every empty frame.
         self._engaged = {region: False for region in _REGION_INSTRUMENT}
-        # Ids last sent as /setForcedInstruments, so an unchanged list — the
-        # common case outside orchestra mode — isn't re-sent.
+        # Ids last sent on each instrument address, so an unchanged list —
+        # the common case outside orchestra mode — isn't re-sent. Active
+        # starts at what the receiver is assumed to boot with, all enabled,
+        # so nothing goes out until piano-only narrows it.
         self._last_forced = []
+        self._last_active = sorted(self._instrument_id(region)
+                                   for region in _REGION_INSTRUMENT)
 
         # Only top part of camera image is active for control
         self.active_area_ratio = 3 / 4
@@ -321,6 +333,25 @@ class OSCGestureApp:
         return (float(np.mean([hand[i].x for i in _TIP_LANDMARKS])),
                 float(np.mean([hand[i].y for i in _TIP_LANDMARKS])))
 
+    # MediaPipe's handedness label is the opposite of the performer's own hand
+    # for this pipeline: it assumes a mirrored image and the tracker already
+    # flips the camera frame, so the two mirrorings cancel out. Swapping here
+    # means everything downstream reads the hand the player is actually using.
+    _HAND_MIRROR = {'Left': 'Right', 'Right': 'Left'}
+
+    @classmethod
+    def _handedness(cls, results, index):
+        """'Left', 'Right' or None — the performer's own hand.
+
+        See _HAND_MIRROR: MediaPipe's raw label is swapped, verified against
+        the live camera rather than taken from its docs.
+        """
+        labels = getattr(results, 'handedness', None) or []
+        if index >= len(labels) or not labels[index]:
+            return None
+        name = getattr(labels[index][0], 'category_name', None)
+        return cls._HAND_MIRROR.get(name)
+
     def _active_hand_indices(self, results):
         """Return hands whose finger-tip centroid is above the exclusion boundary."""
         if not results or not results.hand_landmarks:
@@ -334,13 +365,24 @@ class OSCGestureApp:
         """Absolute frame y of the piano / brass-strings divider."""
         return self.active_area_ratio * self.orchestra_split_ratio
 
-    def _hand_region(self, x, y):
-        """'piano', 'brass' or 'strings' for a position inside the active area."""
+    def _hand_region(self, x, y, handedness=None):
+        """'piano', 'brass' or 'strings' for one hand in the active area.
+
+        Above the piano divider the zone follows which hand it is — left
+        brass, right strings — not which side of the frame it's on, so the
+        hands can cross without swapping instruments and either one can
+        reach the whole pitch range. A hand MediaPipe couldn't label falls
+        back to the frame halves.
+        """
         if not self.orchestra_mode:
             return 'piano'
         if y >= self._orchestra_split_y():
             return 'piano'
-        return 'brass' if x < self.orchestra_column_ratio else 'strings'
+        if handedness == 'Left':
+            return 'brass'
+        if handedness == 'Right':
+            return 'strings'
+        return 'brass' if x < _UNLABELLED_HAND_SPLIT else 'strings'
 
     def _set_orchestra_split(self, frame_y):
         """Move the piano divider, given an absolute frame y."""
@@ -348,9 +390,6 @@ class OSCGestureApp:
             return
         frac = float(frame_y) / self.active_area_ratio
         self.orchestra_split_ratio = float(np.clip(frac, 0.1, 0.9))
-
-    def _set_orchestra_column(self, frame_x):
-        self.orchestra_column_ratio = float(np.clip(float(frame_x), 0.05, 0.95))
 
     def _set_orchestra_mode(self, on):
         if on == self.orchestra_mode:
@@ -361,7 +400,7 @@ class OSCGestureApp:
         # Turning off clears the forced list; turning on states it, since the
         # zone a hand sits in may not have changed and so fire no edge. This
         # reads the previous frame's zones, which the next frame corrects.
-        self.send_forced_instruments()
+        self.send_instrument_state()
         print("Orchestra mode:", on)
 
     def _set_piano_only(self, on):
@@ -369,7 +408,7 @@ class OSCGestureApp:
             return
         self.piano_only = on
         # Changes the forced list without any zone changing under a hand.
-        self.send_forced_instruments()
+        self.send_instrument_state()
         print("Piano-only:", on)
 
     def _reset_range_throttle(self):
@@ -639,34 +678,57 @@ class OSCGestureApp:
                 else [midi_id, lo, hi, -1, -1])
         self._send_range(args, f"{region} reset")
 
-    def send_forced_instruments(self):
-        """Which instruments are held on right now: one id per occupied zone.
+    def _forced_instrument_ids(self):
+        """Which instruments a hand is holding on: brass and strings only.
 
-        Sent on both engagement edges, so an instrument is forced while a hand
-        is in its zone and the list goes out empty once every hand has left.
-        Under piano-only the piano is always in the list instead, and brass
-        and strings join it while occupied. Orchestra mode only — outside it
-        every hand lands in the piano zone, so forcing would just mirror hand
-        presence. Leaving orchestra mode therefore clears the list.
+        The piano is never forced — it's the instrument playing underneath,
+        so this list is what a hand brings in over it, and it empties once
+        the hands are out of the brass and strings zones. Piano-only doesn't
+        change that. Orchestra mode only: outside it the brass and strings
+        zones don't exist, so the list is always empty.
+        """
+        if not self.orchestra_mode:
+            return []
+        return sorted(self._instrument_id(region)
+                      for region in ('brass', 'strings')
+                      if self._engaged[region])
+
+    def _active_instrument_ids(self):
+        """Which instruments may sound at all.
+
+        Piano-only narrows this to the piano plus whichever of brass and
+        strings a hand is in, which is what makes it piano-only. Every other
+        state enables all three, so turning piano-only off — or leaving
+        orchestra mode with it on — hands the receiver back an unnarrowed
+        set rather than leaving it stuck on the last one.
+        """
+        if self.orchestra_mode and self.piano_only:
+            return sorted({self._instrument_id('piano')} |
+                          set(self._forced_instrument_ids()))
+        return sorted(self._instrument_id(region) for region in _REGION_INSTRUMENT)
+
+    def send_instrument_state(self):
+        """Push both instrument lists when what should be sounding changes.
+
+        Active goes first, so an instrument is enabled before it's forced.
+        Each list is sent only when it differs from the last one sent, which
+        keeps the steady state quiet.
         """
         if self.mode == 'pause':
             return
-        if not self.orchestra_mode:
-            ids = []
-        elif self.piano_only:
-            ids = sorted({self._instrument_id('piano')} |
-                         {self._instrument_id(region)
-                          for region in ('brass', 'strings')
-                          if self._engaged[region]})
-        else:
-            ids = sorted(self._instrument_id(region)
-                         for region, on in self._engaged.items() if on)
-        if ids == self._last_forced:
-            return
-        self._last_forced = ids
+        active = self._active_instrument_ids()
+        if active != self._last_active:
+            self._last_active = active
+            self._send_id_list("/setActiveInstruments", active)
+        forced = self._forced_instrument_ids()
+        if forced != self._last_forced:
+            self._last_forced = forced
+            self._send_id_list("/setForcedInstruments", forced)
+
+    def _send_id_list(self, address, ids):
         try:
-            self.osc_client.send_message("/setForcedInstruments", ids)
-            print("OSC → /setForcedInstruments " +
+            self.osc_client.send_message(address, ids)
+            print(f"OSC → {address} " +
                   (" ".join(str(i) for i in ids) if ids else "(empty)"))
         except Exception as e:
             print("OSC send error:", e)
@@ -753,9 +815,12 @@ class OSCGestureApp:
             mode, intensity = self.gesture_result
             self.gesture_sender.tick(mode, intensity, self.osc_client)
 
+        # (x, y, handedness) per active hand: the zone above the piano
+        # divider follows the hand, not its position.
         positions = [self._hand_position(results.hand_landmarks[i])
+                     + (self._handedness(results, i),)
                      for i in active_hand_indices]
-        self.active_regions = sorted({self._hand_region(x, y) for x, y in positions})
+        self.active_regions = sorted({self._hand_region(*p) for p in positions})
 
         self._update_hand_presence()
         self._update_region_engagement()
@@ -788,7 +853,7 @@ class OSCGestureApp:
         # One message per frame, so a hand moving between two regions is a
         # single update rather than a remove followed by an add.
         if changed:
-            self.send_forced_instruments()
+            self.send_instrument_state()
 
     def _clear_region_throttle(self, region):
         """Forget a region's last sent value so the next hand re-sends at once,
@@ -828,8 +893,8 @@ class OSCGestureApp:
             return
 
         grouped = {'piano': [], 'brass': [], 'strings': []}
-        for x, y in positions:
-            grouped[self._hand_region(x, y)].append((x, y))
+        for pos in positions:
+            grouped[self._hand_region(*pos)].append(pos)
 
         if grouped['piano']:
             self._update_piano(grouped['piano'])
@@ -838,11 +903,12 @@ class OSCGestureApp:
                 self._update_instrument(instr, grouped[instr])
 
     def _update_instrument(self, instr, positions):
-        """Send one instrument's range from the hands inside its column.
+        """Send one instrument's range from the hand playing it.
 
-        x maps across the whole frame rather than across the column, so each
-        column reaches its own half of the pitch range: brass the lower half,
-        strings the upper.
+        x maps across the whole frame, so either instrument reaches the whole
+        pitch range wherever its hand is. Two hands only land here together
+        when MediaPipe labelled them the same, and then collapse to their
+        mean x.
         """
         x = float(np.mean([p[0] for p in positions]))
         val = self.map_hand_x_to_val(x)
@@ -862,15 +928,13 @@ class OSCGestureApp:
     def _update_piano(self, positions):
         # Single hand -> first channel only; second slot is sent as -1 -1
         if len(positions) == 1:
-            x, y = positions[0]
-            self.left_val = self.map_hand_x_to_val(x)
+            self.left_val = self.map_hand_x_to_val(positions[0][0])
             self.right_val = None
 
         # Two hands -> left/right
         elif len(positions) >= 2:
-            (x1, y1), (x2, y2) = positions[:2]
-            self.left_val = self.map_hand_x_to_val(x1)
-            self.right_val = self.map_hand_x_to_val(x2)
+            self.left_val = self.map_hand_x_to_val(positions[0][0])
+            self.right_val = self.map_hand_x_to_val(positions[1][0])
 
         # Throttle OSC sends; only fire when change exceeds threshold
         now = time.time()
@@ -917,6 +981,44 @@ class OSCGestureApp:
         with self._frame_lock:
             return self._latest_frame, self._frame_seq
 
+    def _range_bars(self):
+        """Per-instrument pitch spans for the web UI's range display.
+
+        A zone holding a hand reports where that hand has it; an empty one
+        reports the preset default it was reset to, so an idle instrument
+        still shows where it's parked. Only the piano exists outside
+        orchestra mode, so only it is reported there.
+        """
+        lo_off, hi_off = self.interval
+        regions = _RANGE_BAR_ORDER if self.orchestra_mode else ('piano',)
+        bars = []
+        for region in regions:
+            midi_id = self._instrument_id(region)
+            live    = self._engaged[region]
+            spans   = []
+            if live and region == 'piano':
+                spans = [[val + lo_off, val + hi_off]
+                         for val in (self.left_val, self.right_val)
+                         if val is not None]
+            elif live:
+                val = self._instr_state[region]['last_val']
+                if val is not None:
+                    spans = [[val + lo_off, val + hi_off]]
+            if not spans:
+                # Never sounded, or reset on the way out: show the default.
+                default = self._instr_defaults.get(_REGION_INSTRUMENT[region])
+                live = False
+                spans = [] if default is None else [[default[1], default[2]]]
+            bars.append({
+                'instr':  region,
+                'id':     midi_id,
+                'spans':  spans,
+                'live':   live,
+                'active': midi_id in self._last_active,
+                'forced': midi_id in self._last_forced,
+            })
+        return bars
+
     def web_state(self, osc_since=None):
         """Snapshot of everything the browser renders as HUD.
 
@@ -944,13 +1046,15 @@ class OSCGestureApp:
             'left_val':       self.left_val,
             'right_val':      self.right_val,
             'interval':       list(self.interval),
+            'pitch_bounds':   [self.min_val + self.interval[0],
+                               self.max_val + self.interval[1]],
+            'ranges':         self._range_bars(),
             'hands':          hands,
             'osc':            osc_entries,
             'osc_seq':        osc_seq,
             'orchestra':        self.orchestra_mode,
             'piano_only':       self.piano_only,
             'orchestra_split':  round(self._orchestra_split_y(), 4),
-            'orchestra_column': round(self.orchestra_column_ratio, 4),
             'active_regions':   list(self.active_regions),
         }
         if self.debug_mode:
@@ -992,8 +1096,6 @@ class OSCGestureApp:
             self._set_piano_only(bool(payload['piano_only']))
         if 'orchestra_split' in payload:
             self._set_orchestra_split(payload['orchestra_split'])
-        if 'orchestra_column' in payload:
-            self._set_orchestra_column(payload['orchestra_column'])
         if payload.get('clear_osc'):
             self.osc_log.clear()
         if payload.get('quit'):
@@ -1043,22 +1145,26 @@ class OSCGestureApp:
             self._draw_debug_hud(frame)
 
     def _draw_orchestra_regions(self, frame, w, h, inactive_y):
-        """Divider bars and region labels for orchestra mode."""
+        """Piano divider and region labels for orchestra mode.
+
+        There's no brass/strings divider to draw: above the piano split the
+        zone is the hand, so the labels name the hand that plays each.
+        """
         BAR   = (0, 200, 255)     # amber
         LIVE  = (80, 255, 120)    # a region currently holding a hand
         split_y = int(h * self._orchestra_split_y())
-        col_x   = int(w * self.orchestra_column_ratio)
 
         cv2.line(frame, (0, split_y), (w, split_y), BAR, 2)
-        cv2.line(frame, (col_x, 0), (col_x, split_y), BAR, 2)
 
         font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
         def label(text, x, y, region):
             color = LIVE if region in self.active_regions else BAR
             cv2.putText(frame, text, (x, y), font, scale, color, thick, cv2.LINE_AA)
 
-        label("brass",   14,         split_y - 12, 'brass')
-        label("strings", col_x + 14, split_y - 12, 'strings')
+        strings_x = max(14, w - 14 - cv2.getTextSize(
+            "strings (right hand)", font, scale, thick)[0][0])
+        label("brass (left hand)", 14, split_y - 12, 'brass')
+        label("strings (right hand)", strings_x, split_y - 12, 'strings')
         label("piano",   14,         inactive_y - 28, 'piano')
 
     def _handle_key(self, key):
