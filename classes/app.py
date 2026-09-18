@@ -33,6 +33,9 @@ _MODE_COLORS = {
     'slower': (80,  80,  220),
 }
 
+_WINDOW_NAME = "Hand Camera"
+_BOUNDARY_TRACKBAR = "Active area %"
+
 
 class OSCGestureApp:
     # preset name -> (app_mode, baroque, tempo_enabled)
@@ -57,7 +60,7 @@ class OSCGestureApp:
                  camera_index=0,
                  ip="0.0.0.0",
                  port=9001,
-                 preset="pedal-only"):
+                 preset="range"):
         self.interval = (-8, 8)
 
         # OSC client
@@ -106,6 +109,9 @@ class OSCGestureApp:
 
         # Only top part of camera image is active for control
         self.active_area_ratio = 3 / 4
+        self._boundary_dragging = False
+        self._frame_height = None
+        self._boundary_trackbar_ready = False
 
 
     # ----------------------------
@@ -126,31 +132,76 @@ class OSCGestureApp:
     # Gesture detection
     # ----------------------------
 
-    def _extract_world_landmarks(self, results):
+    def _active_hand_indices(self, results):
+        """Return hands whose landmark centroid is above the exclusion boundary."""
+        if not results or not results.hand_landmarks:
+            return []
+        return [
+            i for i, hand in enumerate(results.hand_landmarks[:2])
+            if float(np.mean([lm.y for lm in hand])) <= self.active_area_ratio
+        ]
+
+    def _extract_world_landmarks(self, results, hand_indices):
         """Convert MediaPipe results to (2, 21, 3) float32 array, NaN for missing hands."""
         wl = np.full((2, 21, 3), np.nan, dtype=np.float32)
         if results and results.hand_world_landmarks:
-            for i, hand in enumerate(results.hand_world_landmarks[:2]):
+            for i, hand_index in enumerate(hand_indices):
+                hand = results.hand_world_landmarks[hand_index]
                 for j, lm in enumerate(hand):
                     wl[i, j] = (lm.x, lm.y, lm.z)
         return wl
 
-    def _extract_wrist_img(self, results):
+    def _extract_wrist_img(self, results, hand_indices):
         """Wrist y position per hand in normalised image coords [0,1], NaN if missing."""
         wy = np.full(2, np.nan, dtype=np.float32)
         if results and results.hand_landmarks:
-            for i, hand in enumerate(results.hand_landmarks[:2]):
+            for i, hand_index in enumerate(hand_indices):
+                hand = results.hand_landmarks[hand_index]
                 wy[i] = hand[0].y
         return wy
 
-    def _extract_image_landmarks(self, results):
+    def _extract_image_landmarks(self, results, hand_indices):
         """Image-space landmarks (2, 21, 3) float32, NaN for missing hands."""
         lm = np.full((2, 21, 3), np.nan, dtype=np.float32)
         if results and results.hand_landmarks:
-            for i, hand in enumerate(results.hand_landmarks[:2]):
+            for i, hand_index in enumerate(hand_indices):
+                hand = results.hand_landmarks[hand_index]
                 for j, p in enumerate(hand):
                     lm[i, j] = (p.x, p.y, p.z)
         return lm
+
+    def _set_active_area_ratio(self, ratio):
+        """Keep the exclusion mask, overlay, and native slider in sync."""
+        percent = int(round(float(np.clip(ratio, 0.1, 0.95)) * 100))
+        self.active_area_ratio = percent / 100.0
+        if self._boundary_trackbar_ready:
+            if cv2.getTrackbarPos(_BOUNDARY_TRACKBAR, _WINDOW_NAME) != percent:
+                cv2.setTrackbarPos(_BOUNDARY_TRACKBAR, _WINDOW_NAME, percent)
+
+    def _handle_boundary_slider(self, percent):
+        self._set_active_area_ratio(percent / 100.0)
+
+    def _create_camera_window(self):
+        cv2.namedWindow(_WINDOW_NAME)
+        cv2.setMouseCallback(_WINDOW_NAME, self._handle_mouse)
+        cv2.createTrackbar(_BOUNDARY_TRACKBAR, _WINDOW_NAME,
+                          round(self.active_area_ratio * 100), 95,
+                          self._handle_boundary_slider)
+        cv2.setTrackbarMin(_BOUNDARY_TRACKBAR, _WINDOW_NAME, 10)
+        self._boundary_trackbar_ready = True
+
+    def _handle_mouse(self, event, x, y, flags, param):
+        """Drag anywhere in the red exclusion area to set its top boundary."""
+        if self._frame_height is None:
+            return
+        boundary_y = int(self._frame_height * self.active_area_ratio)
+        if event == cv2.EVENT_LBUTTONDOWN and y >= boundary_y - 12:
+            self._boundary_dragging = True
+            self._set_active_area_ratio(y / self._frame_height)
+        elif event == cv2.EVENT_MOUSEMOVE and self._boundary_dragging:
+            self._set_active_area_ratio(y / self._frame_height)
+        elif event == cv2.EVENT_LBUTTONUP:
+            self._boundary_dragging = False
 
     def _draw_gesture_hud(self, frame, mode, intensity):
         color = _MODE_COLORS.get(mode, (160, 160, 160))
@@ -274,7 +325,7 @@ class OSCGestureApp:
             me_open = me > det.T_OPEN
             _put(f"  mean_ext {me:.2f}  {'>OPEN' if me_open else 'mid'}"
                  f"  fist={'PENDING' if fp else f'int={fi:.2f}'}",
-                 OK if fp else (INFO if me_fist else DIM))
+                  OK if fp else DIM)
 
             y += 6
 
@@ -345,20 +396,23 @@ class OSCGestureApp:
         print("Running OSC Gesture App.")
 
         frame_counter = 0
+        self._create_camera_window()
 
         while self.running:
             # ------------------------
             # Camera + Hand Tracking
             # ------------------------
-            frame, results = self.hand_tracker.get_frame_and_landmarks()
+            frame, results = self.hand_tracker.get_frame_and_landmarks(
+                active_area_ratio=self.active_area_ratio)
 
             if frame is not None:
                 annotated = frame  # operate directly on original frame
 
                 h, w, _ = annotated.shape
+                self._frame_height = h
                 inactive_y = int(h * self.active_area_ratio)
 
-                # Transparent overlay for bottom 1/4
+                # Transparent overlay for the adjustable exclusion region
                 overlay = annotated.copy()
                 cv2.rectangle(
                     overlay,
@@ -369,13 +423,23 @@ class OSCGestureApp:
                 )
                 alpha = 0.25
                 cv2.addWeighted(overlay, alpha, annotated, 1 - alpha, 0, annotated)
+                cv2.line(annotated, (0, inactive_y), (w, inactive_y), (0, 0, 255), 2)
+                cv2.putText(annotated,
+                            f"Active {self.active_area_ratio:.0%} - use slider or drag red area",
+                            (12, inactive_y - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
 
-                self.hand_present = bool(results and results.hand_landmarks)
+                active_hand_indices = self._active_hand_indices(results)
+                self.hand_present = bool(active_hand_indices)
 
                 # Gesture detection (runs every frame, reports every 500 ms)
-                wl  = self._extract_world_landmarks(results)
-                wy  = self._extract_wrist_img(results)
-                il  = self._extract_image_landmarks(results)
+                # Hands below the red boundary are excluded from gesture, range,
+                # and hand-presence processing.
+                if not active_hand_indices:
+                    self.gesture_detector.reset()
+                wl  = self._extract_world_landmarks(results, active_hand_indices)
+                wy  = self._extract_wrist_img(results, active_hand_indices)
+                il  = self._extract_image_landmarks(results, active_hand_indices)
                 prev = self.gesture_result
                 self.gesture_result = self.gesture_detector.update(
                     wl, time.time(), wrist_y=wy, image_landmarks=il)
@@ -402,7 +466,8 @@ class OSCGestureApp:
 
                 if self.hand_present:
                     positions = []
-                    for hand in results.hand_landmarks:
+                    for hand_index in active_hand_indices:
+                        hand = results.hand_landmarks[hand_index]
                         xs = [lm.x for lm in hand]
                         ys = [lm.y for lm in hand]
                         positions.append((float(np.mean(xs)), float(np.mean(ys))))
@@ -410,19 +475,16 @@ class OSCGestureApp:
                     # Single-hand → both channels
                     if len(positions) == 1:
                         x, y = positions[0]
-                        if y <= self.active_area_ratio:
-                            mapped = self.map_hand_x_to_val(x)
-                            self.left_val = mapped
-                            self.right_val = mapped
+                        mapped = self.map_hand_x_to_val(x)
+                        self.left_val = mapped
+                        self.right_val = mapped
 
                     # Two hands → left/right
                     elif len(positions) >= 2:
                         (x1, y1), (x2, y2) = positions[:2]
 
-                        if y1 <= self.active_area_ratio:
-                            self.left_val = self.map_hand_x_to_val(x1)
-                        if y2 <= self.active_area_ratio:
-                            self.right_val = self.map_hand_x_to_val(x2)
+                        self.left_val = self.map_hand_x_to_val(x1)
+                        self.right_val = self.map_hand_x_to_val(x2)
 
                     # Throttle OSC sends; only fire when change exceeds threshold
                     now = time.time()
@@ -439,12 +501,13 @@ class OSCGestureApp:
 
                 # ---- show camera ----
                 if self.draw_landmarks:
-                    annotated = HandLandmarkDrawer.draw_landmarks(annotated, results)
+                    annotated = HandLandmarkDrawer.draw_landmarks(
+                        annotated, results, active_hand_indices)
                 self._draw_gesture_hud(annotated, *self.gesture_result)
                 self._draw_preset_hud(annotated)
                 if self.debug_mode:
                     self._draw_debug_hud(annotated)
-                cv2.imshow("Hand Camera", annotated)
+                cv2.imshow(_WINDOW_NAME, annotated)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     self.running = False

@@ -28,13 +28,23 @@ keys while the camera window is focused, and shown at the bottom of the HUD:
 
 | Key | Preset | Behavior |
 |---|---|---|
-| `1` | `pedal-only` | Only hand-presence pause/resume (`/setManualPause`) — default on startup |
-| `2` | `range` | Pause + pitch range (`/setOutputRange`) from hand x-position |
+| `1` | `pedal-only` | Only hand-presence pause/resume (`/setManualPause`) |
+| `2` | `range` | Pause + pitch range (`/setOutputRange`) from hand x-position — default on startup |
 | `3` | `rc-slow` | Pause + range + runs/chords capped to moderate levels (baroque-style), no tempo adjust |
 | `4` | `rc` | Pause + range + full-range runs/chords (`/playRuns`, `/playChords`), no tempo adjust |
 | `5` | `tempo` | Everything, including gesture-driven tempo adjust (`/adjustTempo`) |
 
 Other controls: `q` quit, `l` toggle landmark drawing, `d` toggle debug HUD.
+
+### Detection exclusion area
+
+The red bottom region is masked before hand detection and excluded from gesture,
+pitch-range, and hand-presence controls. Adjust its boundary using the native
+**Active area %** slider in the camera window (10–95%; starts at 75%). A smaller
+percentage means a larger excluded region. You can also drag in the red area;
+use the slider if image dragging does not respond on your OpenCV backend.
+Changes last for the current session. Restart the app after updating the code;
+an existing packaged executable must be rebuilt to include these controls.
 
 
 ## Recording gesture clips (`record.py`)

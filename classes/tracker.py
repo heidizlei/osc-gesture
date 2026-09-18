@@ -7,10 +7,12 @@ from mediapipe.python.solutions import drawing_utils as mp_drawing
 
 class HandLandmarkDrawer:
     @staticmethod
-    def draw_landmarks(image, detection_result):
+    def draw_landmarks(image, detection_result, hand_indices=None):
         annotated_image = np.copy(image)
         if detection_result and hasattr(detection_result, "hand_landmarks") and detection_result.hand_landmarks:
-            for hand_landmarks in detection_result.hand_landmarks:
+            indices = hand_indices if hand_indices is not None else range(len(detection_result.hand_landmarks))
+            for i in indices:
+                hand_landmarks = detection_result.hand_landmarks[i]
                 hand_proto = landmark_pb2.NormalizedLandmarkList()
                 hand_proto.landmark.extend([
                     landmark_pb2.NormalizedLandmark(x=lm.x, y=lm.y, z=lm.z)
@@ -48,12 +50,16 @@ class HandTracker:
         )
         self.landmarker = HandLandmarker.create_from_options(options)
 
-    def get_frame_and_landmarks(self):
+    def get_frame_and_landmarks(self, active_area_ratio=1.0):
         ret, frame = self.cap.read()
         if not ret:
             return None, None
         frame = cv2.flip(frame, 1)
-        frame_rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+        detection_frame = frame.copy()
+        exclusion_y = int(detection_frame.shape[0] * active_area_ratio)
+        if exclusion_y < detection_frame.shape[0]:
+            detection_frame[exclusion_y:, :] = 0
+        frame_rgba = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGBA)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGBA, data=frame_rgba)
         timestamp = int(time.time() * 1000)
         results = self.landmarker.detect_for_video(mp_image, timestamp)
