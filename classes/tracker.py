@@ -65,7 +65,20 @@ class HandTracker:
         self._last_ts = ts
         return ts
 
+    def _reopen_camera(self):
+        """Retry a camera that failed to open; returns whether it's open now.
+
+        On first launch macOS hasn't granted camera access yet, so OpenCV asks
+        for it and fails the open. Retrying picks the camera up once the user
+        clicks Allow, instead of needing a restart. The pause paces the retries
+        and keeps the gesture loop from spinning while it waits.
+        """
+        time.sleep(1.0)
+        return self.cap.open(self.camera_index)
+
     def get_frame_and_landmarks(self, active_area_ratio=1.0):
+        if not self.cap.isOpened() and not self._reopen_camera():
+            return None, None
         ret, frame = self.cap.read()
         if not ret:
             return None, None

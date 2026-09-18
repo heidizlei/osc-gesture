@@ -9,6 +9,7 @@ os.environ["MPLCONFIGDIR"] = os.path.join(
 )
 
 import argparse
+import sys
 from classes.app import OSCGestureApp
 
 if __name__ == "__main__":
@@ -34,7 +35,16 @@ if __name__ == "__main__":
 
     app = OSCGestureApp(ip=args.host, port=args.port,
                         orchestra_preset=args.orchestra_preset)
-    app.run(ui=args.ui,
-            http_host=args.http_host,
-            http_port=args.http_port,
-            open_browser=not args.no_browser)
+    if args.ui == "web" and getattr(sys, "frozen", False) and sys.platform == "darwin":
+        # The .app needs a native event loop to be quittable from the Dock;
+        # see classes/mac_app.py.
+        from classes.mac_app import run_as_mac_app
+        run_as_mac_app(app,
+                       http_host=args.http_host,
+                       http_port=args.http_port,
+                       open_browser=not args.no_browser)
+    else:
+        app.run(ui=args.ui,
+                http_host=args.http_host,
+                http_port=args.http_port,
+                open_browser=not args.no_browser)

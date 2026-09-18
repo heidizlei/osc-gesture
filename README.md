@@ -353,13 +353,111 @@ detection.
 
 ## Packaging
 
+Builds a self-contained macOS app, with Python, MediaPipe, OpenCV and the hand
+model all inside, for Apple Silicon Macs on macOS 14.5 or later.
+
+After changing the code, one command takes you to a new shareable zip:
+
 ```bash
-make build     # or: pyinstaller --noconfirm osc-gesture.spec
+make release
 ```
 
-Produces `dist/OSC Gesture.app`. The spec bundles `hand_landmarker.task` and
-`ui.html` as data files, resolved at runtime through `_resource_path()`, so the
-web UI works from the frozen app with no extra dependencies.
+It runs these steps, each of which also works on its own:
+
+| Step | What it does | Time |
+|---|---|---|
+| `make build` | `dist/OSC Gesture.app`, ad-hoc signed: runs on this Mac only | ~15 s |
+| `make sign` | re-signs with your Developer ID, hardened runtime | ~15 s |
+| `make check` | launches the signed app and checks it serves its UI (the camera blinks on) | ~5 s |
+| `make notarize` | notarizes with Apple, staples the ticket, zips for sharing | a few min |
+
+The result is `dist/OSC-Gesture-<version>-macOS-arm64.zip`, the file to share.
+The ticket is stapled inside, so recipients unzip it and double-click, with no
+Gatekeeper warnings, even offline. Bump `VERSION` in `osc-gesture.spec` when you
+hand out a new build, so people can tell builds apart.
+
+`make check` exists because some breakage only shows up in the frozen app: a
+module PyInstaller didn't pick up, a data file the spec doesn't list, something
+the hardened runtime blocks. It fails before anything is uploaded, printing the
+app's output. PyInstaller follows imports on its own, so new code in `classes/`
+needs nothing extra. Two kinds of change do need a step first:
+
+- **A new pip dependency:** install it into the build environment as well as
+  adding it to `requirements.txt`.
+- **A new non-Python file** the app reads at runtime (like `ui.html`): add it
+  to `datas` in `osc-gesture.spec`, and load it through `_resource_path()`.
+
+While iterating, `python main.py` from source is quicker than rebuilding;
+`make watch` rebuilds the app on every save if you need the bundled one.
+
+### One-time setup
+
+Install the build tools into the environment the app runs from, which is
+`.venv` by default:
+
+```bash
+uv pip install -r requirements-build.txt   # or: pip install -r requirements-build.txt
+```
+
+Per-machine settings go in `local.mk` at the project root. It's gitignored, and
+any of its settings can also be given on the command line for a single run
+(`make notarize NOTARY_PROFILE=…`):
+
+```make
+# notarytool keychain profile
+NOTARY_PROFILE = my-profile
+# build from another environment
+PYINSTALLER = /opt/miniconda3/envs/pipe/bin/pyinstaller
+# only needed with several Developer ID certificates
+CODESIGN_IDENTITY = Developer ID Application: … (TEAMID)
+```
+
+Signing needs a **Developer ID Application** certificate in your keychain
+(`security find-identity -v -p codesigning` lists them).
+
+Notarizing needs a notarytool keychain profile for that certificate's team.
+An existing one works, even one made for another app; name it in `local.mk`.
+Without a `local.mk` setting, `make notarize` looks for a profile called
+`osc-gesture`. To create one, you need an Apple ID on the team and an
+app-specific password for it (account.apple.com → Sign-In and Security →
+App-Specific Passwords):
+
+```bash
+xcrun notarytool store-credentials osc-gesture \
+    --apple-id <you@example.com> --team-id <TEAMID> --password <app-specific-password>
+```
+
+### Using the app
+
+- Double-clicking it opens the controls in the default browser. The first
+  launch asks for camera access, and the preview starts as soon as it's
+  allowed. No restart is needed.
+- It sits in the Dock: quit from there or with Cmd-Q, which stops the camera.
+  Clicking the Dock icon, or opening the app again, re-opens the controls if the
+  tab was closed.
+- Flags work when you run the executable inside the bundle directly:
+
+  ```bash
+  "/Applications/OSC Gesture.app/Contents/MacOS/OSC Gesture" --host 192.168.1.20 --port 9001
+  ```
+
+- If camera access was denied, re-enable it in System Settings → Privacy &
+  Security → Camera, or reset it with
+  `tccutil reset Camera edu.mit.media.osc-gesture`.
+
+### How the bundle is put together
+
+- The spec bundles `hand_landmarker.task` and `ui.html` (plus `orchestra.json`,
+  if one exists at the project root) as data files. They're resolved at runtime
+  through `_resource_path()`.
+- It excludes `jax`, `jaxlib` and `scipy`. MediaPipe declares them, but nothing
+  the app uses imports them, and they'd add ~330 MB. If a change starts using a
+  MediaPipe feature that needs them, take them out of `excludes`.
+- In the frozen app, `main.py` runs the web UI under a native AppKit event loop
+  (`classes/mac_app.py`) so the app can be quit and re-opened like any other.
+  From source, nothing changes.
+- `packaging/entitlements.plist` grants the camera. The hardened runtime that
+  notarization requires blocks it otherwise.
 
 ## Project layout
 
@@ -370,4 +468,6 @@ web UI works from the frozen app with no extra dependencies.
 - `classes/gesture_detector.py` — classifies hand motion into noop/runs/chords/faster/slower
 - `classes/gesture_sender.py` — debounces/accumulates gesture detections into OSC messages
 - `classes/recorder_app.py`, `classes/playback_app.py` — recording/playback tooling
+- `classes/mac_app.py` — native macOS event loop for the packaged `.app`
+- `osc-gesture.spec`, `packaging/` — PyInstaller spec, signing and notarization scripts
 - `recordings/` — recorded `.npz` gesture clips
