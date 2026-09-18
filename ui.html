@@ -184,7 +184,11 @@
     display: flex; align-items: center; gap: 8px;
     font-size: 0.85rem; cursor: pointer;
   }
+  .mode-toggle label + label { margin-top: 8px; }
+  /* Piano-only only means anything inside orchestra mode. */
+  .mode-toggle label.off { opacity: 0.4; cursor: default; }
   .mode-toggle input { width: 16px; height: 16px; accent-color: #fb3; cursor: pointer; }
+  .mode-toggle input:disabled { cursor: default; }
   .key-hint { color: #666; font-size: 0.7rem; margin-left: auto; }
 
   /* A titled block sharing a section with what's above it. */
@@ -373,6 +377,10 @@
         <input type="checkbox" id="orchestra"> Orchestra
         <span class="key-hint">O</span>
       </label>
+      <label id="pianoOnlyRow">
+        <input type="checkbox" id="pianoOnly"> Piano-only
+        <span class="key-hint">P</span>
+      </label>
     </div>
     <div class="sub-block">
       <h2>Display</h2>
@@ -457,21 +465,22 @@ const MAX_LOG_ROWS = 40;      // matches the server's buffer cap
 // One colour per OSC message type. The gesture addresses reuse the HUD's mode
 // colours so the log and the readout agree.
 const OSC_COLORS = {
-  "/setManualPause": "#e0864f",
-  "/playRuns":       "#50c850",
-  "/playChords":     "#50c8c8",
-  "/adjustTempo":    "#c8c850",
-  "/resetControl":   "#a893d8",
+  "/setManualPause":      "#e0864f",
+  "/setForcedInstruments": "#8fd6a0",
+  "/playRuns":            "#50c850",
+  "/playChords":          "#50c8c8",
+  "/adjustTempo":         "#c8c850",
+  "/resetControl":        "#a893d8",
 };
 
 // /setOutputRange is split further by which instrument it targets: the
 // four-argument form is the piano, the five-argument form leads with the
-// instrument position (1 strings, 2 brass).
+// instrument's General MIDI program (48 strings, 61 brass).
 const RANGE_COLORS = {
   piano: "#6cbfff",      // the four-argument form
-  0:     "#6cbfff",      // ...and the piano's own index, same colour
-  1:     "#e891d8",      // strings
-  2:     "#f5a73c",      // brass
+  1:     "#6cbfff",      // ...and the piano's own program, same colour
+  48:    "#e891d8",      // strings
+  61:    "#f5a73c",      // brass
 };
 
 const OSC_FALLBACK = "#b9b9b9";
@@ -733,6 +742,8 @@ $("debug").addEventListener("change", (e) =>
   send({ debug: e.target.checked }));
 $("orchestra").addEventListener("change", (e) =>
   send({ orchestra: e.target.checked }));
+$("pianoOnly").addEventListener("change", (e) =>
+  send({ piano_only: e.target.checked }));
 
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -746,6 +757,8 @@ document.addEventListener("keydown", (e) => {
     send({ debug: !state?.debug });
   } else if (e.key === "o" || e.key === "O") {
     send({ orchestra: !state?.orchestra });
+  } else if (e.key === "p" || e.key === "P") {
+    send({ piano_only: !state?.piano_only });
   }
 });
 
@@ -856,13 +869,19 @@ function apply(s, opts = {}) {
   $("handDot").classList.toggle("on", s.hand_present);
 
   const [lo, hi] = s.interval;
+  const rightRange = s.right_val === null
+    ? "-1 -1"
+    : `${s.right_val + lo}–${s.right_val + hi}`;
   $("rangeInfo").textContent =
     `output range   L ${s.left_val + lo}–${s.left_val + hi}` +
-    `   R ${s.right_val + lo}–${s.right_val + hi}`;
+    `   R ${rightRange}`;
 
   if ($("landmarks") !== document.activeElement) $("landmarks").checked = s.draw_landmarks;
   if ($("debug") !== document.activeElement) $("debug").checked = s.debug;
   if ($("orchestra") !== document.activeElement) $("orchestra").checked = s.orchestra;
+  if ($("pianoOnly") !== document.activeElement) $("pianoOnly").checked = s.piano_only;
+  $("pianoOnly").disabled = !s.orchestra;
+  $("pianoOnlyRow").classList.toggle("off", !s.orchestra);
 
   $("debugPanel").classList.toggle("on", s.debug);
   if (s.debug) renderDebug(s.debug_scores, s.thresholds);

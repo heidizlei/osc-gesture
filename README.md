@@ -35,7 +35,7 @@ your browser. The main row is three columns:
 
 | Column | Contents |
 |---|---|
-| Left | Preset buttons (`1`–`5`), orchestra toggle (`o`), landmark/debug toggles |
+| Left | Preset buttons (`1`–`5`), orchestra (`o`) and piano-only (`p`) toggles, landmark/debug toggles |
 | Centre | Camera preview with the draggable region dividers |
 | Right | Gesture readout on top, live OSC log below |
 
@@ -128,17 +128,17 @@ the bottom of the HUD:
 | `5` | `tempo` | Everything, including gesture-driven tempo adjust (`/adjustTempo`) |
 
 Other controls: `q` quit, `l` toggle landmark drawing, `d` toggle debug HUD,
-`o` toggle orchestra mode.
+`o` toggle orchestra mode, `p` toggle piano-only.
 
 ## Orchestra mode
 
-Toggle it with the checkbox under the presets, or the `o` key. It splits the
-active region into three instrument zones:
+Toggle it with the first checkbox under the presets, or the `o` key. It splits
+the active region into three instrument zones:
 
 ```
 ┌─────────────────┬─────────────────┐
 │     BRASS       │    STRINGS      │   ← top half, split by a vertical bar
-│   (instr 2)     │   (instr 1)     │      (both bars draggable)
+│   (instr 61)    │   (instr 48)    │      (both bars draggable)
 ├─────────────────┴─────────────────┤   ← horizontal bar (draggable)
 │              PIANO                │   ← bottom half
 │           (4-arg form)            │
@@ -156,8 +156,12 @@ of the active region, so it stays valid when you move the exclusion boundary.
 | Zone | Message |
 |---|---|
 | Piano | `/setOutputRange lo hi lo2 hi2` — the original four-argument form |
-| Strings | `/setOutputRange 1 lo hi -1 -1` |
-| Brass | `/setOutputRange 2 lo hi -1 -1` |
+| Strings | `/setOutputRange 48 lo hi -1 -1` |
+| Brass | `/setOutputRange 61 lo hi -1 -1` |
+
+The leading argument is the zone's **General MIDI program** — 48 string
+ensemble, 61 brass section — read from the preset entry the zone maps to, so
+pointing the app at a different preset changes the ids it sends.
 
 Each zone's range is driven by the hands currently inside it, independently of
 the others. Two hands in the same zone collapse to one message at their mean x.
@@ -172,6 +176,47 @@ the pitch mapping, and whether a hand is inside the active area at all.
 reaches only its own half of the pitch range: brass the lower half, strings the
 upper.
 
+### Forced instruments
+
+Alongside the range messages, `/setForcedInstruments` carries the ids of the
+zones that currently hold a hand, so an instrument is only forced on while a
+hand is in its zone:
+
+| Occupied zones | Message |
+|---|---|
+| Strings | `/setForcedInstruments 48` |
+| Strings + brass | `/setForcedInstruments 48 61` |
+| Piano | `/setForcedInstruments 1` |
+| None | `/setForcedInstruments` — no arguments, clearing the list |
+
+It's edge-triggered on the same per-zone engagement the resets use: one
+message when the set of occupied zones changes, none while it holds steady. A
+hand crossing from one zone to another is a single message with the new list,
+not a remove followed by an add. Ids come from the preset, same as the range
+messages.
+
+Orchestra mode only. Outside it every hand lands in the piano zone, so
+forcing would just mirror hand presence — leaving orchestra mode sends the
+empty list, and re-entering it states the current zones.
+
+#### Piano-only
+
+The **piano-only** checkbox (or the `p` key) keeps the piano forced on
+regardless of where the hands are, with brass and strings joining it while
+their zones are occupied:
+
+| Occupied zones | Message |
+|---|---|
+| None, or piano only | `/setForcedInstruments 1` |
+| Strings | `/setForcedInstruments 1 48` |
+| Strings + brass | `/setForcedInstruments 1 48 61` |
+
+So the list is never empty while it's on, and a hand entering or leaving the
+piano zone sends nothing — the piano is already in the list. It only applies
+inside orchestra mode (the checkbox is disabled outside it), and toggling it
+re-sends the list immediately. With it off, the list is exactly the occupied
+zones, as above.
+
 ### Zone resets
 
 When a zone's last hand leaves it, that zone is reset once to its instrument's
@@ -180,24 +225,25 @@ reset is edge-triggered — it fires on the transition to empty, not on every
 empty frame — and it clears that zone's send throttle so returning a hand to
 the same spot re-sends immediately.
 
-Defaults come from an orchestra preset's `outputInstruments` list, indexed by
-the same zero-based number that's sent as the instrument argument. The entry
-`id`s are General MIDI programs, which is what fixes the order — 1 is grand
-piano, 48 string ensemble, 61 brass section:
+Each zone maps to a zero-based slot in an orchestra preset's
+`outputInstruments` list, and both its default range and the instrument id it
+sends come from that entry:
 
-| Zone | Index | Preset entry | Default range |
+| Zone | Preset slot | Sent as | Default range |
 |---|---|---|---|
-| Piano | 0 | `outputInstruments[0]`, `id: 1` (grand piano) | 26–89 |
-| Strings | 1 | `outputInstruments[1]`, `id: 48` (string ensemble) | 33–94 |
-| Brass | 2 | `outputInstruments[2]`, `id: 61` (brass section) | 36–92 |
+| Piano | `outputInstruments[0]` — `id: 1` (grand piano) | — (4-arg form) | 26–89 |
+| Strings | `outputInstruments[1]` — `id: 48` (string ensemble) | `48` | 33–94 |
+| Brass | `outputInstruments[2]` — `id: 61` (brass section) | `61` | 36–92 |
 
-(The ranges shown are from the preset this was built against; the app reads
-whatever your preset has.) The piano's live updates use the four-argument form
-with no index, so index 0 only ever appears in a reset.
+(The ids and ranges shown are from the preset this was built against; the app
+reads whatever your preset has, and falls back to these when an entry has no
+usable `id`.) The piano's live updates use the four-argument form with no
+instrument argument, so its id only ever appears in a reset — and there the
+four-argument form is used too, so it never goes out at all.
 
 Point the app at a preset with `--orchestra-preset path/to/orchestra.json`;
 without it, the app looks for `orchestra.json` beside itself and otherwise
-falls back to built-in values. The zone→position mapping lives in
+falls back to built-in values. The zone→preset-slot mapping lives in
 `_REGION_INSTRUMENT` in `classes/app.py` — one dict to change if a zone should
 drive a different preset instrument.
 

@@ -33,20 +33,20 @@ def _resource_path(relative_path):
 # these rather than of all 21 landmarks.
 _TIP_LANDMARKS = (4, 8, 12, 16, 20)
 
-# Region -> the instrument argument sent as /setOutputRange's first value,
-# which is also the zero-based index of that instrument in an orchestra
-# preset's "outputInstruments" list. Change this one mapping to re-assign
-# which preset instrument a region drives.
+# Region -> the zero-based index of that instrument in an orchestra preset's
+# "outputInstruments" list. Change this one mapping to re-assign which preset
+# instrument a region drives. The value sent on the wire is not this index but
+# the entry's General MIDI program id (see App._instrument_id).
 _REGION_INSTRUMENT = {
     'piano':   0,
     'strings': 1,
     'brass':   2,
 }
 
-# Fallback instrument ranges, used when no orchestra preset file is found.
-# Mirrors the "outputInstruments" defaults of the preset this was built
-# against; the ids are General MIDI programs (1 grand piano, 48 string
-# ensemble, 61 brass section), which is what fixes the order above.
+# Fallback instruments, used when no orchestra preset file is found. Mirrors
+# the "outputInstruments" defaults of the preset this was built against; the
+# ids are General MIDI programs (1 grand piano, 48 string ensemble, 61 brass
+# section), which is what fixes the order above.
 _DEFAULT_INSTRUMENTS = [
     {'id': 1,  'low': 26, 'high': 89},   # piano
     {'id': 48, 'low': 33, 'high': 94},   # strings
@@ -57,11 +57,11 @@ _ORCHESTRA_PRESET = "orchestra.json"
 
 
 def _load_instrument_defaults(preset_path=None):
-    """Map zero-based instrument index -> (low, high) from an orchestra preset.
+    """Map instrument index -> (midi_id, low, high) from an orchestra preset.
 
-    Reads "outputInstruments" out of a preset JSON file so a region's reset
-    range matches whatever the receiving app is configured for. Falls back to
-    _DEFAULT_INSTRUMENTS when there's no readable preset.
+    Reads "outputInstruments" out of a preset JSON file so a region's MIDI
+    program and reset range match whatever the receiving app is configured
+    for. Falls back to _DEFAULT_INSTRUMENTS when there's no readable preset.
     """
     instruments = _DEFAULT_INSTRUMENTS
     path = preset_path or _resource_path(_ORCHESTRA_PRESET)
@@ -79,13 +79,22 @@ def _load_instrument_defaults(preset_path=None):
     except (OSError, ValueError) as e:
         print(f"Could not read orchestra preset {path}: {e}; using built-in defaults")
 
-    ranges = {}
+    entries = {}
     for index, inst in enumerate(instruments):
         try:
-            ranges[index] = (int(inst['low']), int(inst['high']))
+            low, high = int(inst['low']), int(inst['high'])
         except (KeyError, TypeError, ValueError):
             continue
-    return ranges
+        try:
+            midi_id = int(inst['id'])
+        except (KeyError, TypeError, ValueError):
+            # No usable id in the preset: fall back to the built-in program
+            # for this slot so the wire value is still a MIDI instrument.
+            if index >= len(_DEFAULT_INSTRUMENTS):
+                continue
+            midi_id = _DEFAULT_INSTRUMENTS[index]['id']
+        entries[index] = (midi_id, low, high)
+    return entries
 
 _MODE_COLORS = {
     'noop':   (160, 160, 160),
@@ -254,6 +263,10 @@ class OSCGestureApp:
         self.orchestra_split_ratio = 0.5
         # Frame x dividing brass (left) from strings (right).
         self.orchestra_column_ratio = 0.5
+        # Piano-only: the piano is forced on whatever the hands are doing, and
+        # a hand in brass or strings adds its instrument alongside it, instead
+        # of the forced list being exactly the occupied zones.
+        self.piano_only = False
         self._instr_state = {name: {'last_val': None, 'last_time': 0.0}
                              for name in ('brass', 'strings')}
         self._instr_defaults = _load_instrument_defaults(orchestra_preset)
@@ -261,6 +274,9 @@ class OSCGestureApp:
         # Per-region "a hand was here last frame", so a reset fires on the
         # transition to empty rather than on every empty frame.
         self._engaged = {region: False for region in _REGION_INSTRUMENT}
+        # Ids last sent as /setForcedInstruments, so an unchanged list — the
+        # common case outside orchestra mode — isn't re-sent.
+        self._last_forced = []
 
         # Only top part of camera image is active for control
         self.active_area_ratio = 3 / 4
@@ -342,7 +358,19 @@ class OSCGestureApp:
         self.orchestra_mode = on
         # The regions changed under the hands, so forget the throttle state.
         self._reset_range_throttle()
+        # Turning off clears the forced list; turning on states it, since the
+        # zone a hand sits in may not have changed and so fire no edge. This
+        # reads the previous frame's zones, which the next frame corrects.
+        self.send_forced_instruments()
         print("Orchestra mode:", on)
+
+    def _set_piano_only(self, on):
+        if on == self.piano_only:
+            return
+        self.piano_only = on
+        # Changes the forced list without any zone changing under a hand.
+        self.send_forced_instruments()
+        print("Piano-only:", on)
 
     def _reset_range_throttle(self):
         """Forget the last sent values so a layout change sends promptly."""
@@ -555,8 +583,13 @@ class OSCGestureApp:
 
             arg1 = left_val + self.interval[0]
             arg2 = left_val + self.interval[1]
-            arg3 = right_val + self.interval[0]
-            arg4 = right_val + self.interval[1]
+            # right_val is None while only one hand is in frame: the second
+            # slot goes out as -1 -1 rather than echoing the first.
+            if right_val is None:
+                arg3 = arg4 = -1
+            else:
+                arg3 = right_val + self.interval[0]
+                arg4 = right_val + self.interval[1]
 
         try:
             self.osc_client.send_message("/setOutputRange", [arg1, arg2, arg3, arg4])
@@ -572,11 +605,23 @@ class OSCGestureApp:
         except Exception as e:
             print("OSC send error:", e)
 
+    def _instrument_id(self, region):
+        """General MIDI program sent as /setOutputRange's instrument argument.
+
+        Comes from the preset entry this region maps to, so pointing the app
+        at a different preset changes the ids it sends.
+        """
+        index = _REGION_INSTRUMENT[region]
+        entry = self._instr_defaults.get(index)
+        if entry is not None:
+            return entry[0]
+        return _DEFAULT_INSTRUMENTS[index]['id']
+
     def send_instrument_range(self, instr, lo, hi):
-        """Orchestra-mode range for one instrument: instr, lo, hi, -1, -1."""
+        """Orchestra-mode range for one instrument: id, lo, hi, -1, -1."""
         if self.mode == 'pause':
             return
-        self._send_range([_REGION_INSTRUMENT[instr], lo, hi, -1, -1], instr)
+        self._send_range([self._instrument_id(instr), lo, hi, -1, -1], instr)
 
     def send_region_reset(self, region):
         """Reset one region's instrument to its preset default range.
@@ -586,13 +631,45 @@ class OSCGestureApp:
         """
         if self.mode == 'pause':
             return
-        index = _REGION_INSTRUMENT[region]
-        default = self._instr_defaults.get(index)
+        default = self._instr_defaults.get(_REGION_INSTRUMENT[region])
         if default is None:
             return
-        lo, hi = default
-        args = [lo, hi, -1, -1] if region == 'piano' else [index, lo, hi, -1, -1]
+        midi_id, lo, hi = default
+        args = ([lo, hi, -1, -1] if region == 'piano'
+                else [midi_id, lo, hi, -1, -1])
         self._send_range(args, f"{region} reset")
+
+    def send_forced_instruments(self):
+        """Which instruments are held on right now: one id per occupied zone.
+
+        Sent on both engagement edges, so an instrument is forced while a hand
+        is in its zone and the list goes out empty once every hand has left.
+        Under piano-only the piano is always in the list instead, and brass
+        and strings join it while occupied. Orchestra mode only — outside it
+        every hand lands in the piano zone, so forcing would just mirror hand
+        presence. Leaving orchestra mode therefore clears the list.
+        """
+        if self.mode == 'pause':
+            return
+        if not self.orchestra_mode:
+            ids = []
+        elif self.piano_only:
+            ids = sorted({self._instrument_id('piano')} |
+                         {self._instrument_id(region)
+                          for region in ('brass', 'strings')
+                          if self._engaged[region]})
+        else:
+            ids = sorted(self._instrument_id(region)
+                         for region, on in self._engaged.items() if on)
+        if ids == self._last_forced:
+            return
+        self._last_forced = ids
+        try:
+            self.osc_client.send_message("/setForcedInstruments", ids)
+            print("OSC → /setForcedInstruments " +
+                  (" ".join(str(i) for i in ids) if ids else "(empty)"))
+        except Exception as e:
+            print("OSC send error:", e)
 
     def send_manual_pause(self, pause_flag):
         try:
@@ -688,21 +765,30 @@ class OSCGestureApp:
         return frame, results, active_hand_indices
 
     def _update_region_engagement(self):
-        """Reset a region's instrument once its last hand leaves it.
+        """Track which regions hold a hand, and react on the edges.
 
-        Without this an instrument holds whatever range a hand last set — the
-        piano would stay parked while both hands are up in the brass/strings
-        half, and vice versa. Outside orchestra mode only 'piano' is ever
-        engaged, so the other regions never fire.
+        Leaving resets that region's instrument — without it an instrument
+        holds whatever range a hand last set, so the piano would stay parked
+        while both hands are up in the brass/strings half, and vice versa.
+        Either edge re-sends the forced-instrument list. Outside orchestra
+        mode only 'piano' is ever engaged, so the other regions never fire.
         """
         live = set(self.active_regions)
+        changed = False
         for region in self._engaged:
             if region in live:
-                self._engaged[region] = True
+                if not self._engaged[region]:
+                    self._engaged[region] = True
+                    changed = True
             elif self._engaged[region]:
                 self._engaged[region] = False
+                changed = True
                 self.send_region_reset(region)
                 self._clear_region_throttle(region)
+        # One message per frame, so a hand moving between two regions is a
+        # single update rather than a remove followed by an add.
+        if changed:
+            self.send_forced_instruments()
 
     def _clear_region_throttle(self, region):
         """Forget a region's last sent value so the next hand re-sends at once,
@@ -774,12 +860,11 @@ class OSCGestureApp:
                                    val + self.interval[1])
 
     def _update_piano(self, positions):
-        # Single-hand -> both channels
+        # Single hand -> first channel only; second slot is sent as -1 -1
         if len(positions) == 1:
             x, y = positions[0]
-            mapped = self.map_hand_x_to_val(x)
-            self.left_val = mapped
-            self.right_val = mapped
+            self.left_val = self.map_hand_x_to_val(x)
+            self.right_val = None
 
         # Two hands -> left/right
         elif len(positions) >= 2:
@@ -791,7 +876,12 @@ class OSCGestureApp:
         now = time.time()
         if now - self.last_osc_time >= self.osc_interval:
             left_changed = self.last_left is None or abs(self.left_val - self.last_left) > self.change_threshold
-            right_changed = self.last_right is None or abs(self.right_val - self.last_right) > self.change_threshold
+            if self.right_val is None or self.last_right is None:
+                # Hand count changed (or first send): always resend so the
+                # second slot's -1 -1 reaches the receiver.
+                right_changed = self.right_val != self.last_right
+            else:
+                right_changed = abs(self.right_val - self.last_right) > self.change_threshold
 
             if left_changed or right_changed:
                 self.last_left = self.left_val
@@ -858,6 +948,7 @@ class OSCGestureApp:
             'osc':            osc_entries,
             'osc_seq':        osc_seq,
             'orchestra':        self.orchestra_mode,
+            'piano_only':       self.piano_only,
             'orchestra_split':  round(self._orchestra_split_y(), 4),
             'orchestra_column': round(self.orchestra_column_ratio, 4),
             'active_regions':   list(self.active_regions),
@@ -897,6 +988,8 @@ class OSCGestureApp:
             print("Debug mode:", self.debug_mode)
         if 'orchestra' in payload:
             self._set_orchestra_mode(bool(payload['orchestra']))
+        if 'piano_only' in payload:
+            self._set_piano_only(bool(payload['piano_only']))
         if 'orchestra_split' in payload:
             self._set_orchestra_split(payload['orchestra_split'])
         if 'orchestra_column' in payload:
@@ -979,6 +1072,8 @@ class OSCGestureApp:
             print("Debug mode:", self.debug_mode)
         elif key == ord('o'):
             self._set_orchestra_mode(not self.orchestra_mode)
+        elif key == ord('p'):
+            self._set_piano_only(not self.piano_only)
         elif key in self._PRESET_KEYS:
             self._apply_preset(self._PRESET_KEYS[key])
 
