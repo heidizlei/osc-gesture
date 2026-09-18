@@ -1,6 +1,9 @@
 import time
 import os
 import sys
+import json
+import threading
+import collections
 import cv2
 import numpy as np
 from pythonosc import udp_client
@@ -25,6 +28,65 @@ def _resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
+# MediaPipe hand landmark indices for the five finger tips. All hand-position
+# decisions (active area, orchestra region, pitch mapping) use the centroid of
+# these rather than of all 21 landmarks.
+_TIP_LANDMARKS = (4, 8, 12, 16, 20)
+
+# Region -> the instrument argument sent as /setOutputRange's first value,
+# which is also the zero-based index of that instrument in an orchestra
+# preset's "outputInstruments" list. Change this one mapping to re-assign
+# which preset instrument a region drives.
+_REGION_INSTRUMENT = {
+    'piano':   0,
+    'strings': 1,
+    'brass':   2,
+}
+
+# Fallback instrument ranges, used when no orchestra preset file is found.
+# Mirrors the "outputInstruments" defaults of the preset this was built
+# against; the ids are General MIDI programs (1 grand piano, 48 string
+# ensemble, 61 brass section), which is what fixes the order above.
+_DEFAULT_INSTRUMENTS = [
+    {'id': 1,  'low': 26, 'high': 89},   # piano
+    {'id': 48, 'low': 33, 'high': 94},   # strings
+    {'id': 61, 'low': 36, 'high': 92},   # brass
+]
+
+_ORCHESTRA_PRESET = "orchestra.json"
+
+
+def _load_instrument_defaults(preset_path=None):
+    """Map zero-based instrument index -> (low, high) from an orchestra preset.
+
+    Reads "outputInstruments" out of a preset JSON file so a region's reset
+    range matches whatever the receiving app is configured for. Falls back to
+    _DEFAULT_INSTRUMENTS when there's no readable preset.
+    """
+    instruments = _DEFAULT_INSTRUMENTS
+    path = preset_path or _resource_path(_ORCHESTRA_PRESET)
+    try:
+        with open(path) as fh:
+            found = json.load(fh).get('outputInstruments')
+        if isinstance(found, list) and found:
+            instruments = found
+            print(f"Orchestra instrument defaults loaded from {path}")
+        else:
+            print(f"No usable outputInstruments in {path}; using built-in defaults")
+    except FileNotFoundError:
+        if preset_path:      # only noisy when the user asked for a specific file
+            print(f"Orchestra preset not found: {path}; using built-in defaults")
+    except (OSError, ValueError) as e:
+        print(f"Could not read orchestra preset {path}: {e}; using built-in defaults")
+
+    ranges = {}
+    for index, inst in enumerate(instruments):
+        try:
+            ranges[index] = (int(inst['low']), int(inst['high']))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return ranges
+
 _MODE_COLORS = {
     'noop':   (160, 160, 160),
     'runs':   (80,  200, 80),
@@ -32,6 +94,79 @@ _MODE_COLORS = {
     'faster': (80,  200, 200),
     'slower': (80,  80,  220),
 }
+
+def _jsonable(value):
+    """Coerce numpy scalars and nested containers into JSON-serialisable values."""
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, (bool, np.bool_)):       # before int: bool subclasses int
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        return round(float(value), 4)
+    return value
+
+
+class _OSCLog:
+    """Forwarding wrapper that records every OSC message sent.
+
+    Wrapping the client rather than hooking each call site means the log also
+    picks up the sends made by GestureSender, which talks to the client
+    directly. Exceptions still propagate, so the existing error printing at the
+    call sites is unchanged.
+    """
+
+    def __init__(self, client, maxlen=40):
+        self._client  = client
+        self._lock    = threading.Lock()
+        self._entries = collections.deque(maxlen=maxlen)
+        self._seq     = 0
+
+    def send_message(self, address, value):
+        try:
+            self._client.send_message(address, value)
+        except Exception as e:
+            self._record(address, value, error=str(e))
+            raise
+        self._record(address, value)
+
+    def _record(self, address, value, error=None):
+        if isinstance(value, (list, tuple)):
+            args = [_jsonable(v) for v in value]
+        elif value is None:
+            args = []
+        else:
+            args = [_jsonable(value)]
+        with self._lock:
+            self._seq += 1
+            self._entries.append({
+                'seq':   self._seq,
+                't':     time.time(),
+                'addr':  address,
+                'args':  args,
+                'error': error,
+            })
+
+    def since(self, seq):
+        """(entries newer than `seq`, current high-water mark).
+
+        The browser passes back the last seq it saw, so each poll ships only
+        new lines instead of the whole buffer.
+        """
+        with self._lock:
+            if seq is None:
+                entries = list(self._entries)
+            else:
+                entries = [e for e in self._entries if e['seq'] > seq]
+            return entries, self._seq
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+
 
 _WINDOW_NAME = "Hand Camera"
 _BOUNDARY_TRACKBAR = "Active area %"
@@ -60,11 +195,15 @@ class OSCGestureApp:
                  camera_index=0,
                  ip="0.0.0.0",
                  port=9001,
-                 preset="range"):
+                 preset="range",
+                 orchestra_preset=None):
         self.interval = (-8, 8)
 
-        # OSC client
-        self.osc_client = udp_client.SimpleUDPClient(ip, port)
+        # OSC client, wrapped so the web UI can show the same feed the
+        # terminal prints. Both names point at the wrapper; osc_log stays
+        # valid even if a caller swaps out osc_client.
+        self.osc_log    = _OSCLog(udp_client.SimpleUDPClient(ip, port))
+        self.osc_client = self.osc_log
 
         # Hand tracking
         self.hand_tracker = HandTracker(
@@ -107,11 +246,39 @@ class OSCGestureApp:
         self.hand_absent_since  = None   # timestamp when hand first disappeared
         self.PAUSE_ABSENT_S     = 0.5    # seconds of sustained absence before sending pause
 
+        # Orchestra mode: the active region splits into a piano half (bottom)
+        # and a brass/strings half (top), divided again into two columns.
+        self.orchestra_mode = False
+        # Fraction of the active region, so the divider stays valid when the
+        # exclusion boundary moves. Above it = brass/strings, below = piano.
+        self.orchestra_split_ratio = 0.5
+        # Frame x dividing brass (left) from strings (right).
+        self.orchestra_column_ratio = 0.5
+        self._instr_state = {name: {'last_val': None, 'last_time': 0.0}
+                             for name in ('brass', 'strings')}
+        self._instr_defaults = _load_instrument_defaults(orchestra_preset)
+        self.active_regions = []
+        # Per-region "a hand was here last frame", so a reset fires on the
+        # transition to empty rather than on every empty frame.
+        self._engaged = {region: False for region in _REGION_INSTRUMENT}
+
         # Only top part of camera image is active for control
         self.active_area_ratio = 3 / 4
         self._boundary_dragging = False
         self._frame_height = None
         self._boundary_trackbar_ready = False
+
+        # Newest frame published to the web UI. The gesture loop only swaps a
+        # reference in here; JPEG encoding happens on the server thread so the
+        # preview never gates detection.
+        self._frame_lock   = threading.Lock()
+        self._latest_frame = None
+        self._latest_hands = []
+        self._frame_seq    = 0
+
+        self.fps = 0.0
+        self._last_frame_time = None
+        self._tint = None       # cached solid-colour buffer for the cv2 overlay
 
 
     # ----------------------------
@@ -132,14 +299,58 @@ class OSCGestureApp:
     # Gesture detection
     # ----------------------------
 
+    @staticmethod
+    def _hand_position(hand):
+        """Hand position as the centroid of the five finger-tip landmarks."""
+        return (float(np.mean([hand[i].x for i in _TIP_LANDMARKS])),
+                float(np.mean([hand[i].y for i in _TIP_LANDMARKS])))
+
     def _active_hand_indices(self, results):
-        """Return hands whose landmark centroid is above the exclusion boundary."""
+        """Return hands whose finger-tip centroid is above the exclusion boundary."""
         if not results or not results.hand_landmarks:
             return []
         return [
             i for i, hand in enumerate(results.hand_landmarks[:2])
-            if float(np.mean([lm.y for lm in hand])) <= self.active_area_ratio
+            if self._hand_position(hand)[1] <= self.active_area_ratio
         ]
+
+    def _orchestra_split_y(self):
+        """Absolute frame y of the piano / brass-strings divider."""
+        return self.active_area_ratio * self.orchestra_split_ratio
+
+    def _hand_region(self, x, y):
+        """'piano', 'brass' or 'strings' for a position inside the active area."""
+        if not self.orchestra_mode:
+            return 'piano'
+        if y >= self._orchestra_split_y():
+            return 'piano'
+        return 'brass' if x < self.orchestra_column_ratio else 'strings'
+
+    def _set_orchestra_split(self, frame_y):
+        """Move the piano divider, given an absolute frame y."""
+        if self.active_area_ratio <= 0:
+            return
+        frac = float(frame_y) / self.active_area_ratio
+        self.orchestra_split_ratio = float(np.clip(frac, 0.1, 0.9))
+
+    def _set_orchestra_column(self, frame_x):
+        self.orchestra_column_ratio = float(np.clip(float(frame_x), 0.05, 0.95))
+
+    def _set_orchestra_mode(self, on):
+        if on == self.orchestra_mode:
+            return
+        self.orchestra_mode = on
+        # The regions changed under the hands, so forget the throttle state.
+        self._reset_range_throttle()
+        print("Orchestra mode:", on)
+
+    def _reset_range_throttle(self):
+        """Forget the last sent values so a layout change sends promptly."""
+        self.last_left = None
+        self.last_right = None
+        for st in self._instr_state.values():
+            st['last_val'] = None
+            st['last_time'] = 0.0
 
     def _extract_world_landmarks(self, results, hand_indices):
         """Convert MediaPipe results to (2, 21, 3) float32 array, NaN for missing hands."""
@@ -353,6 +564,36 @@ class OSCGestureApp:
         except Exception as e:
             print("OSC send error:", e)
 
+    def _send_range(self, args, label):
+        try:
+            self.osc_client.send_message("/setOutputRange", args)
+            print("OSC → /setOutputRange " +
+                  " ".join(str(a) for a in args) + f"  ({label})")
+        except Exception as e:
+            print("OSC send error:", e)
+
+    def send_instrument_range(self, instr, lo, hi):
+        """Orchestra-mode range for one instrument: instr, lo, hi, -1, -1."""
+        if self.mode == 'pause':
+            return
+        self._send_range([_REGION_INSTRUMENT[instr], lo, hi, -1, -1], instr)
+
+    def send_region_reset(self, region):
+        """Reset one region's instrument to its preset default range.
+
+        The piano keeps the plain four-argument form; the other regions carry
+        their instrument argument, matching how their live updates are sent.
+        """
+        if self.mode == 'pause':
+            return
+        index = _REGION_INSTRUMENT[region]
+        default = self._instr_defaults.get(index)
+        if default is None:
+            return
+        lo, hi = default
+        args = [lo, hi, -1, -1] if region == 'piano' else [index, lo, hi, -1, -1]
+        self._send_range(args, f"{region} reset")
+
     def send_manual_pause(self, pause_flag):
         try:
             self.osc_client.send_message("/setManualPause", pause_flag)
@@ -389,140 +630,410 @@ class OSCGestureApp:
 
 
     # ----------------------------
+    # Frame processing (UI-independent)
+    # ----------------------------
+
+    def _tick_fps(self):
+        now = time.perf_counter()
+        if self._last_frame_time is not None:
+            dt = now - self._last_frame_time
+            if dt > 0:
+                inst = 1.0 / dt
+                self.fps = inst if not self.fps else self.fps * 0.9 + inst * 0.1
+        self._last_frame_time = now
+
+    def _step(self):
+        """Run one capture -> track -> detect -> send cycle.
+
+        Draws nothing, so both the OpenCV window and the web UI can drive it.
+        Returns (frame, results, active_hand_indices); frame is None when the
+        camera gave us nothing this round.
+        """
+        frame, results = self.hand_tracker.get_frame_and_landmarks(
+            active_area_ratio=self.active_area_ratio)
+        if frame is None:
+            return None, None, []
+
+        self._frame_height = frame.shape[0]
+        self._tick_fps()
+
+        active_hand_indices = self._active_hand_indices(results)
+        self.hand_present = bool(active_hand_indices)
+
+        # Gesture detection (runs every frame, reports every 500 ms).
+        # Hands below the red boundary are excluded from gesture, range,
+        # and hand-presence processing.
+        if not active_hand_indices:
+            self.gesture_detector.reset()
+        wl  = self._extract_world_landmarks(results, active_hand_indices)
+        wy  = self._extract_wrist_img(results, active_hand_indices)
+        il  = self._extract_image_landmarks(results, active_hand_indices)
+        prev = self.gesture_result
+        self.gesture_result = self.gesture_detector.update(
+            wl, time.time(), wrist_y=wy, image_landmarks=il)
+        # Only tick the sender when a new report has been emitted
+        if self.gesture_result is not prev and self.mode == 'tempo':
+            mode, intensity = self.gesture_result
+            self.gesture_sender.tick(mode, intensity, self.osc_client)
+
+        positions = [self._hand_position(results.hand_landmarks[i])
+                     for i in active_hand_indices]
+        self.active_regions = sorted({self._hand_region(x, y) for x, y in positions})
+
+        self._update_hand_presence()
+        self._update_region_engagement()
+        if positions:
+            self._update_output_range(positions)
+
+        return frame, results, active_hand_indices
+
+    def _update_region_engagement(self):
+        """Reset a region's instrument once its last hand leaves it.
+
+        Without this an instrument holds whatever range a hand last set — the
+        piano would stay parked while both hands are up in the brass/strings
+        half, and vice versa. Outside orchestra mode only 'piano' is ever
+        engaged, so the other regions never fire.
+        """
+        live = set(self.active_regions)
+        for region in self._engaged:
+            if region in live:
+                self._engaged[region] = True
+            elif self._engaged[region]:
+                self._engaged[region] = False
+                self.send_region_reset(region)
+                self._clear_region_throttle(region)
+
+    def _clear_region_throttle(self, region):
+        """Forget a region's last sent value so the next hand re-sends at once,
+        rather than being compared against what it sent before leaving."""
+        if region == 'piano':
+            self.last_left = None
+            self.last_right = None
+        else:
+            self._instr_state[region]['last_val'] = None
+            self._instr_state[region]['last_time'] = 0.0
+
+    def _update_hand_presence(self):
+        """Send pause only after the hand has been absent for PAUSE_ABSENT_S,
+        to avoid spurious pause/resume on brief detection dropouts."""
+        now = time.time()
+        if self.hand_present:
+            self.hand_absent_since = None
+            if not self.last_hand_present:
+                self.send_manual_pause(0)  # resume immediately on reappearance
+                self.last_hand_present = True
+        else:
+            if self.hand_absent_since is None:
+                self.hand_absent_since = now
+            elif (self.last_hand_present and
+                  now - self.hand_absent_since >= self.PAUSE_ABSENT_S):
+                self.send_manual_pause(1)  # pause after sustained absence
+                self.last_hand_present = False
+
+    def _update_output_range(self, positions):
+        """Route hand positions to instrument channels and send their ranges.
+
+        Outside orchestra mode every hand drives the piano channel, which keeps
+        the original single-hand / two-hand behaviour.
+        """
+        if not self.orchestra_mode:
+            self._update_piano(positions)
+            return
+
+        grouped = {'piano': [], 'brass': [], 'strings': []}
+        for x, y in positions:
+            grouped[self._hand_region(x, y)].append((x, y))
+
+        if grouped['piano']:
+            self._update_piano(grouped['piano'])
+        for instr in ('brass', 'strings'):
+            if grouped[instr]:
+                self._update_instrument(instr, grouped[instr])
+
+    def _update_instrument(self, instr, positions):
+        """Send one instrument's range from the hands inside its column.
+
+        x maps across the whole frame rather than across the column, so each
+        column reaches its own half of the pitch range: brass the lower half,
+        strings the upper.
+        """
+        x = float(np.mean([p[0] for p in positions]))
+        val = self.map_hand_x_to_val(x)
+
+        st = self._instr_state[instr]
+        now = time.time()
+        if now - st['last_time'] < self.osc_interval:
+            return
+        if (st['last_val'] is not None and
+                abs(val - st['last_val']) <= self.change_threshold):
+            return
+        st['last_val']  = val
+        st['last_time'] = now
+        self.send_instrument_range(instr, val + self.interval[0],
+                                   val + self.interval[1])
+
+    def _update_piano(self, positions):
+        # Single-hand -> both channels
+        if len(positions) == 1:
+            x, y = positions[0]
+            mapped = self.map_hand_x_to_val(x)
+            self.left_val = mapped
+            self.right_val = mapped
+
+        # Two hands -> left/right
+        elif len(positions) >= 2:
+            (x1, y1), (x2, y2) = positions[:2]
+            self.left_val = self.map_hand_x_to_val(x1)
+            self.right_val = self.map_hand_x_to_val(x2)
+
+        # Throttle OSC sends; only fire when change exceeds threshold
+        now = time.time()
+        if now - self.last_osc_time >= self.osc_interval:
+            left_changed = self.last_left is None or abs(self.left_val - self.last_left) > self.change_threshold
+            right_changed = self.last_right is None or abs(self.right_val - self.last_right) > self.change_threshold
+
+            if left_changed or right_changed:
+                self.last_left = self.left_val
+                self.last_right = self.right_val
+                self.last_osc_time = now
+                self.inactivity_message_sent = False
+                self.send_osc_message()
+
+
+    # ----------------------------
+    # Web UI interface
+    # ----------------------------
+
+    def _publish_frame(self, frame, results, active_hand_indices):
+        """Hand the newest frame (and landmark coords) to the web UI.
+
+        Nothing is drawn here: the browser composites the boundary, HUD and
+        landmarks, so the preview costs this loop one reference swap.
+        """
+        hands = []
+        if self.draw_landmarks and results and results.hand_landmarks:
+            for i in active_hand_indices:
+                hands.append([[round(lm.x, 4), round(lm.y, 4)]
+                              for lm in results.hand_landmarks[i]])
+        with self._frame_lock:
+            self._latest_frame = frame
+            self._latest_hands = hands
+            self._frame_seq   += 1
+
+    def latest_frame(self):
+        """(frame, seq) for the newest published frame; seq lets the streamer
+        skip re-encoding a frame it has already sent."""
+        with self._frame_lock:
+            return self._latest_frame, self._frame_seq
+
+    def web_state(self, osc_since=None):
+        """Snapshot of everything the browser renders as HUD.
+
+        `osc_since` is the last OSC seq the browser has, so only newer log
+        lines get shipped.
+        """
+        mode, intensity = self.gesture_result
+        sender     = self.gesture_sender
+        sent_mode  = sender._last_sent_mode or 'none'
+        sent_level = sender._last_sent_level
+        with self._frame_lock:
+            hands = self._latest_hands
+        osc_entries, osc_seq = self.osc_log.since(osc_since)
+        state = {
+            'preset':         self.preset,
+            'presets':        list(self._PRESETS),
+            'mode':           mode,
+            'intensity':      round(float(intensity), 3),
+            'last_sent':      sent_mode if sent_level is None else f"{sent_mode} L{sent_level}",
+            'active_area':    round(self.active_area_ratio, 3),
+            'hand_present':   self.hand_present,
+            'draw_landmarks': self.draw_landmarks,
+            'debug':          self.debug_mode,
+            'fps':            round(self.fps, 1),
+            'left_val':       self.left_val,
+            'right_val':      self.right_val,
+            'interval':       list(self.interval),
+            'hands':          hands,
+            'osc':            osc_entries,
+            'osc_seq':        osc_seq,
+            'orchestra':        self.orchestra_mode,
+            'orchestra_split':  round(self._orchestra_split_y(), 4),
+            'orchestra_column': round(self.orchestra_column_ratio, 4),
+            'active_regions':   list(self.active_regions),
+        }
+        if self.debug_mode:
+            det = self.gesture_detector
+            state['debug_scores'] = _jsonable(det.debug_scores)
+            state['thresholds'] = {
+                'run_tip_artic':     det.T_RUN_TIP_ARTIC,
+                'chord_tip_disp':    det.T_CHORD_TIP_DISP,
+                'run_ext':           det.T_RUN_EXT,
+                'index_ext':         det.T_INDEX_EXT,
+                'others_dist_ratio': det.T_OTHERS_DIST_RATIO,
+                'index_hold':        det.T_INDEX_HOLD,
+                'rotate':            det.T_ROTATE,
+                'open':              det.T_OPEN,
+            }
+        return state
+
+    def apply_control(self, payload):
+        """Apply a control message from the browser and return the new state.
+
+        Raises ValueError on an unknown preset so the handler can answer 400.
+        """
+        if 'preset' in payload:
+            name = payload['preset']
+            if name not in self._PRESETS:
+                raise ValueError(f"unknown preset: {name!r}")
+            self._apply_preset(name)
+        if 'active_area' in payload:
+            self._set_active_area_ratio(float(payload['active_area']))
+        if 'draw_landmarks' in payload:
+            self.draw_landmarks = bool(payload['draw_landmarks'])
+            print("Draw landmarks:", self.draw_landmarks)
+        if 'debug' in payload:
+            self.debug_mode = bool(payload['debug'])
+            print("Debug mode:", self.debug_mode)
+        if 'orchestra' in payload:
+            self._set_orchestra_mode(bool(payload['orchestra']))
+        if 'orchestra_split' in payload:
+            self._set_orchestra_split(payload['orchestra_split'])
+        if 'orchestra_column' in payload:
+            self._set_orchestra_column(payload['orchestra_column'])
+        if payload.get('clear_osc'):
+            self.osc_log.clear()
+        if payload.get('quit'):
+            self.running = False
+        # Deliberately omits OSC entries: the browser tracks those through its
+        # own polling seq, and returning them here would double them up.
+        return self.web_state(osc_since=self.osc_log.since(None)[1])
+
+
+    # ----------------------------
+    # OpenCV rendering
+    # ----------------------------
+
+    def _strip_tint(self, shape):
+        """Cached solid-colour buffer for the exclusion-region blend."""
+        if self._tint is None or self._tint.shape != shape:
+            self._tint = np.empty(shape, dtype=np.uint8)
+            self._tint[:] = (100, 100, 255)
+        return self._tint
+
+    def _render_cv2(self, frame, results, active_hand_indices):
+        """Draw the overlay and HUDs onto `frame`, in place."""
+        h, w = frame.shape[:2]
+        inactive_y = int(h * self.active_area_ratio)
+
+        # Tint only the excluded strip. Copying the whole frame and blending
+        # all of it cost more than everything else drawn here combined.
+        if inactive_y < h:
+            strip = frame[inactive_y:, :]
+            cv2.addWeighted(strip, 0.75, self._strip_tint(strip.shape), 0.25, 0,
+                            dst=strip)
+        cv2.line(frame, (0, inactive_y), (w, inactive_y), (0, 0, 255), 2)
+        cv2.putText(frame,
+                    f"Active {self.active_area_ratio:.0%} - use slider or drag red area",
+                    (12, inactive_y - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+
+        if self.orchestra_mode:
+            self._draw_orchestra_regions(frame, w, h, inactive_y)
+
+        if self.draw_landmarks:
+            HandLandmarkDrawer.draw_landmarks(
+                frame, results, active_hand_indices, copy=False)
+        self._draw_gesture_hud(frame, *self.gesture_result)
+        self._draw_preset_hud(frame)
+        if self.debug_mode:
+            self._draw_debug_hud(frame)
+
+    def _draw_orchestra_regions(self, frame, w, h, inactive_y):
+        """Divider bars and region labels for orchestra mode."""
+        BAR   = (0, 200, 255)     # amber
+        LIVE  = (80, 255, 120)    # a region currently holding a hand
+        split_y = int(h * self._orchestra_split_y())
+        col_x   = int(w * self.orchestra_column_ratio)
+
+        cv2.line(frame, (0, split_y), (w, split_y), BAR, 2)
+        cv2.line(frame, (col_x, 0), (col_x, split_y), BAR, 2)
+
+        font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+        def label(text, x, y, region):
+            color = LIVE if region in self.active_regions else BAR
+            cv2.putText(frame, text, (x, y), font, scale, color, thick, cv2.LINE_AA)
+
+        label("brass",   14,         split_y - 12, 'brass')
+        label("strings", col_x + 14, split_y - 12, 'strings')
+        label("piano",   14,         inactive_y - 28, 'piano')
+
+    def _handle_key(self, key):
+        if key == ord('q'):
+            self.running = False
+        elif key == ord('l'):
+            self.draw_landmarks = not self.draw_landmarks
+            print("Draw landmarks:", self.draw_landmarks)
+        elif key == ord('d'):
+            self.debug_mode = not self.debug_mode
+            print("Debug mode:", self.debug_mode)
+        elif key == ord('o'):
+            self._set_orchestra_mode(not self.orchestra_mode)
+        elif key in self._PRESET_KEYS:
+            self._apply_preset(self._PRESET_KEYS[key])
+
+
+    # ----------------------------
     # Main Loop
     # ----------------------------
 
-    def run(self):
-        print("Running OSC Gesture App.")
+    def run(self, ui="web", http_host="127.0.0.1", http_port=8765,
+            open_browser=True):
+        if ui == "web":
+            return self._run_web(http_host, http_port, open_browser)
+        return self._run_cv2()
+
+    def _run_cv2(self):
+        print("Running OSC Gesture App (OpenCV window).")
 
         frame_counter = 0
         self._create_camera_window()
 
-        while self.running:
-            # ------------------------
-            # Camera + Hand Tracking
-            # ------------------------
-            frame, results = self.hand_tracker.get_frame_and_landmarks(
-                active_area_ratio=self.active_area_ratio)
+        try:
+            while self.running:
+                frame, results, active_hand_indices = self._step()
+                if frame is not None:
+                    self._render_cv2(frame, results, active_hand_indices)
+                    cv2.imshow(_WINDOW_NAME, frame)
+                    self._handle_key(cv2.waitKey(1) & 0xFF)
 
-            if frame is not None:
-                annotated = frame  # operate directly on original frame
+                if frame_counter % 300 == 0:
+                    gc.collect()
+                frame_counter += 1
+        except KeyboardInterrupt:
+            print("\nStopping.")
+        finally:
+            cv2.destroyAllWindows()
+            self.hand_tracker.close()
 
-                h, w, _ = annotated.shape
-                self._frame_height = h
-                inactive_y = int(h * self.active_area_ratio)
+    def _run_web(self, http_host, http_port, open_browser):
+        from .web_ui import WebUI
 
-                # Transparent overlay for the adjustable exclusion region
-                overlay = annotated.copy()
-                cv2.rectangle(
-                    overlay,
-                    (0, inactive_y),
-                    (w, h),
-                    (100, 100, 255),    # color
-                    -1
-                )
-                alpha = 0.25
-                cv2.addWeighted(overlay, alpha, annotated, 1 - alpha, 0, annotated)
-                cv2.line(annotated, (0, inactive_y), (w, inactive_y), (0, 0, 255), 2)
-                cv2.putText(annotated,
-                            f"Active {self.active_area_ratio:.0%} - use slider or drag red area",
-                            (12, inactive_y - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+        web = WebUI(self, host=http_host, port=http_port)
+        web.start(open_browser=open_browser)
 
-                active_hand_indices = self._active_hand_indices(results)
-                self.hand_present = bool(active_hand_indices)
+        frame_counter = 0
+        try:
+            while self.running:
+                frame, results, active_hand_indices = self._step()
+                if frame is not None:
+                    self._publish_frame(frame, results, active_hand_indices)
 
-                # Gesture detection (runs every frame, reports every 500 ms)
-                # Hands below the red boundary are excluded from gesture, range,
-                # and hand-presence processing.
-                if not active_hand_indices:
-                    self.gesture_detector.reset()
-                wl  = self._extract_world_landmarks(results, active_hand_indices)
-                wy  = self._extract_wrist_img(results, active_hand_indices)
-                il  = self._extract_image_landmarks(results, active_hand_indices)
-                prev = self.gesture_result
-                self.gesture_result = self.gesture_detector.update(
-                    wl, time.time(), wrist_y=wy, image_landmarks=il)
-                # Only tick the sender when a new report has been emitted
-                if self.gesture_result is not prev and self.mode == 'tempo':
-                    mode, intensity = self.gesture_result
-                    self.gesture_sender.tick(mode, intensity, self.osc_client)
-
-                # Send pause only after hand has been absent for PAUSE_ABSENT_S,
-                # to avoid spurious pause/resume on brief detection dropouts.
-                now = time.time()
-                if self.hand_present:
-                    self.hand_absent_since = None
-                    if not self.last_hand_present:
-                        self.send_manual_pause(0)  # resume immediately on reappearance
-                        self.last_hand_present = True
-                else:
-                    if self.hand_absent_since is None:
-                        self.hand_absent_since = now
-                    elif (self.last_hand_present and
-                          now - self.hand_absent_since >= self.PAUSE_ABSENT_S):
-                        self.send_manual_pause(1)  # pause after sustained absence
-                        self.last_hand_present = False
-
-                if self.hand_present:
-                    positions = []
-                    for hand_index in active_hand_indices:
-                        hand = results.hand_landmarks[hand_index]
-                        xs = [lm.x for lm in hand]
-                        ys = [lm.y for lm in hand]
-                        positions.append((float(np.mean(xs)), float(np.mean(ys))))
-
-                    # Single-hand → both channels
-                    if len(positions) == 1:
-                        x, y = positions[0]
-                        mapped = self.map_hand_x_to_val(x)
-                        self.left_val = mapped
-                        self.right_val = mapped
-
-                    # Two hands → left/right
-                    elif len(positions) >= 2:
-                        (x1, y1), (x2, y2) = positions[:2]
-
-                        self.left_val = self.map_hand_x_to_val(x1)
-                        self.right_val = self.map_hand_x_to_val(x2)
-
-                    # Throttle OSC sends; only fire when change exceeds threshold
-                    now = time.time()
-                    if now - self.last_osc_time >= self.osc_interval:
-                        left_changed = self.last_left is None or abs(self.left_val - self.last_left) > self.change_threshold
-                        right_changed = self.last_right is None or abs(self.right_val - self.last_right) > self.change_threshold
-
-                        if left_changed or right_changed:
-                            self.last_left = self.left_val
-                            self.last_right = self.right_val
-                            self.last_osc_time = now
-                            self.inactivity_message_sent = False
-                            self.send_osc_message()
-
-                # ---- show camera ----
-                if self.draw_landmarks:
-                    annotated = HandLandmarkDrawer.draw_landmarks(
-                        annotated, results, active_hand_indices)
-                self._draw_gesture_hud(annotated, *self.gesture_result)
-                self._draw_preset_hud(annotated)
-                if self.debug_mode:
-                    self._draw_debug_hud(annotated)
-                cv2.imshow(_WINDOW_NAME, annotated)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    self.running = False
-                elif key == ord('l'):
-                    self.draw_landmarks = not self.draw_landmarks
-                    print("Draw landmarks:", self.draw_landmarks)
-                elif key == ord('d'):
-                    self.debug_mode = not self.debug_mode
-                    print("Debug mode:", self.debug_mode)
-                elif key in self._PRESET_KEYS:
-                    self._apply_preset(self._PRESET_KEYS[key])
-
-            if frame_counter % 300 == 0:
-                gc.collect()
-            frame_counter += 1
-
-        cv2.destroyAllWindows()
-        self.hand_tracker.close()
+                if frame_counter % 300 == 0:
+                    gc.collect()
+                frame_counter += 1
+        except KeyboardInterrupt:
+            print("\nStopping.")
+        finally:
+            web.stop()
+            self.hand_tracker.close()

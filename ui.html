@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>OSC Gesture</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #282828;
+    --card: #333;
+    --line: #444;
+    --text: #e8e8e8;
+    --dim: #888;
+    --accent: #6cf;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15px;
+    padding: 20px 16px 40px;
+    max-width: 1440px;
+    margin: 0 auto;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  header h1 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: #ccc;
+    flex: 1;
+  }
+  .stat {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8rem;
+    color: var(--dim);
+  }
+  .dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: #555;
+    transition: background 0.15s;
+  }
+  .dot.on { background: #5c5; box-shadow: 0 0 8px #5c5; }
+
+  section {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+  }
+  section h2 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 12px;
+  }
+
+  /* ---- three-column main row: presets | stream | osc log ---- */
+  .main {
+    display: grid;
+    grid-template-columns: 160px minmax(0, 1fr) 300px;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .main > section {
+    margin-bottom: 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  @media (max-width: 900px) {
+    .main { grid-template-columns: 1fr; }
+    #oscLog { max-height: 260px; }
+  }
+
+  /* ---- camera stage ---- */
+  #stage {
+    position: relative;
+    width: 100%;
+    background: #111;
+    border-radius: 8px;
+    overflow: hidden;
+    line-height: 0;
+    touch-action: none;       /* let us own drag gestures on iPad */
+    user-select: none;
+  }
+  #cam { display: block; width: 100%; height: auto; }
+  #cam.offline { opacity: 0.25; }
+  #lm {
+    position: absolute;
+    inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  /* The excluded region: drag it (or its handle) to move the boundary. */
+  #excl {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    background: rgba(255, 100, 100, 0.25);
+    border-top: 2px solid #f44;
+    cursor: ns-resize;
+  }
+  #excl::after {
+    content: "";
+    position: absolute;
+    top: -14px; left: 50%;
+    transform: translateX(-50%);
+    width: 54px; height: 5px;
+    border-radius: 3px;
+    background: #f44;
+  }
+  #exclLabel {
+    position: absolute;
+    left: 10px; top: -22px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #f77;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  #stage.drag-excl #excl { background: rgba(255, 100, 100, 0.4); }
+  .hint { font-size: 0.75rem; color: #6e6e6e; margin-top: 10px; }
+
+  /* ---- orchestra-mode dividers ---- */
+  #regions { position: absolute; inset: 0; pointer-events: none; }
+  #regions[hidden] { display: none; }
+  #splitBar, #colBar { position: absolute; background: #fb3; }
+  #splitBar { left: 0; right: 0; height: 2px; }
+  #splitBar::after {
+    content: "";
+    position: absolute; top: -2px; left: 50%;
+    transform: translateX(-50%);
+    width: 54px; height: 6px;
+    border-radius: 3px; background: #fb3;
+  }
+  #colBar { top: 0; width: 2px; }
+  #colBar::after {
+    content: "";
+    position: absolute; left: -2px; top: 50%;
+    transform: translateY(-50%);
+    width: 6px; height: 44px;
+    border-radius: 3px; background: #fb3;
+  }
+  #stage.drag-split #splitBar, #stage.drag-column #colBar {
+    background: #fd6;
+    box-shadow: 0 0 8px rgba(255, 187, 51, 0.9);
+  }
+  .rlabel {
+    position: absolute;
+    font-size: 10px;
+    line-height: 1.5;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #fb3;
+    background: rgba(0, 0, 0, 0.45);
+    padding: 1px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .rlabel.live { color: #142; background: #7f7; }
+
+  /* ---- orchestra toggle under the presets ---- */
+  .mode-toggle {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .mode-toggle label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 0.85rem; cursor: pointer;
+  }
+  .mode-toggle input { width: 16px; height: 16px; accent-color: #fb3; cursor: pointer; }
+  .key-hint { color: #666; font-size: 0.7rem; margin-left: auto; }
+
+  /* A titled block sharing a section with what's above it. */
+  .sub-block {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+  #gestureBlock {
+    padding-bottom: 14px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* ---- preset buttons (vertical column) ---- */
+  .presets { display: flex; flex-direction: column; gap: 8px; }
+  .presets button {
+    width: 100%;
+    text-align: left;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 0.88rem;
+    color: var(--text);
+    background: #3d3d3d;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .presets button:hover { background: #484848; }
+  .presets button:active { transform: translateY(1px); }
+  .presets button[aria-pressed="true"] {
+    background: #2a4a2a;
+    border-color: #5c5;
+    color: #cfc;
+  }
+  .presets .key {
+    display: block;
+    font-size: 0.68rem;
+    color: var(--dim);
+    margin-top: 2px;
+  }
+  .presets button[aria-pressed="true"] .key { color: #8b8; }
+
+  /* ---- OSC log column ---- */
+  .log-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .log-head h2 { margin-bottom: 0; flex: 1; }
+  #oscCount {
+    font-size: 0.7rem;
+    color: #666;
+    font-variant-numeric: tabular-nums;
+  }
+  #oscClear {
+    font: inherit;
+    font-size: 0.7rem;
+    color: var(--dim);
+    background: none;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 2px 7px;
+    cursor: pointer;
+  }
+  #oscClear:hover { color: var(--text); border-color: #666; }
+  #oscLog {
+    /* flex-basis 0 + min-height 0 keeps the box from being grown by its own
+       content; its height is set from the stage height in JS. */
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: 420px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    font-family: var(--mono);
+    font-size: 0.71rem;
+    line-height: 1.5;
+    background: #2b2b2b;
+    border: 1px solid #3c3c3c;
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+  .osc-row {
+    padding: 1px 0;
+    word-break: break-word;
+  }
+  .osc-row .ts { color: #5f5f5f; }
+  /* Address and args inherit the row colour, which is set per message type. */
+  .osc-row .addr { color: inherit; font-weight: 500; }
+  .osc-row .args { color: inherit; opacity: 0.72; }
+  .osc-row.err { color: #e66 !important; }
+  .osc-row.err .args { opacity: 1; }
+  .osc-row.err .msg { color: #e66; }
+  #oscEmpty { color: #5a5a5a; font-style: italic; }
+
+  /* ---- gesture readout ---- */
+  .readout {
+    display: flex; align-items: baseline; gap: 10px;
+    flex-wrap: wrap; margin-bottom: 10px;
+  }
+  #mode { font-size: 1.25rem; font-weight: 600; letter-spacing: 0.02em; }
+  #intensityVal { font-variant-numeric: tabular-nums; color: var(--dim); font-size: 0.95rem; }
+  #sent {
+    margin-left: auto;
+    font-size: 0.8rem;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: #3d3d3d;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar { height: 10px; border-radius: 5px; background: #3c3c3c; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; border-radius: 5px; transition: width 0.08s linear; }
+  .range-info {
+    margin-top: 10px;
+    font-size: 0.78rem;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- toggles (stacked, they live in the narrow left column) ---- */
+  .toggles { display: flex; flex-direction: column; gap: 10px; }
+  .toggles label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 0.85rem; cursor: pointer;
+  }
+  .toggles input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+
+  /* ---- debug ---- */
+  #debugPanel { display: none; }
+  #debugPanel.on { display: block; }
+  .hand { margin-bottom: 14px; }
+  .hand:last-child { margin-bottom: 0; }
+  .hand h3 {
+    font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #b98; margin-bottom: 7px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  td {
+    padding: 3px 6px;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid #3a3a3a;
+  }
+  td:first-child { color: var(--dim); width: 40%; }
+  td.v { text-align: right; width: 30%; }
+  td.t { text-align: right; color: #666; }
+  tr.ok td.v { color: #6d6; }
+  tr.fail td.v { color: #e66; }
+  .verdict { display: flex; gap: 8px; margin-top: 7px; }
+  .chip {
+    font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 4px; background: #3a3a3a; color: #777;
+  }
+  .chip.on { background: #2a4a2a; color: #9e9; }
+
+  #err {
+    display: none;
+    background: #4a2a2a;
+    border: 1px solid #a55;
+    color: #fbb;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    margin-bottom: 14px;
+  }
+  #err.on { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>OSC Gesture</h1>
+  <span class="stat" id="fps">— fps</span>
+  <span class="dot" id="handDot" title="hand detected in active area"></span>
+</header>
+
+<div id="err"></div>
+
+<div class="main">
+  <section>
+    <h2>Preset</h2>
+    <div class="presets" id="presets"></div>
+    <div class="mode-toggle">
+      <label>
+        <input type="checkbox" id="orchestra"> Orchestra
+        <span class="key-hint">O</span>
+      </label>
+    </div>
+    <div class="sub-block">
+      <h2>Display</h2>
+      <div class="toggles">
+        <label><input type="checkbox" id="landmarks"> Landmarks
+               <span class="key-hint">L</span></label>
+        <label><input type="checkbox" id="debug"> Debug scores
+               <span class="key-hint">D</span></label>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div id="stage">
+      <img id="cam" src="/stream" alt="camera preview">
+      <canvas id="lm"></canvas>
+      <div id="excl"><span id="exclLabel"></span></div>
+      <div id="regions" hidden>
+        <div id="colBar"></div>
+        <div id="splitBar"></div>
+        <div class="rlabel" id="labBrass">brass</div>
+        <div class="rlabel" id="labStrings">strings</div>
+        <div class="rlabel" id="labPiano">piano</div>
+      </div>
+    </div>
+    <p class="hint" id="stageHint">Drag the red region to move the exclusion boundary. In
+       orchestra mode, drag the amber bars to move the piano split and the
+       brass/strings divide.</p>
+  </section>
+
+  <section>
+    <div id="gestureBlock">
+      <h2>Gesture</h2>
+      <div class="readout">
+        <span id="mode">noop</span>
+        <span id="intensityVal">0.00</span>
+        <span id="sent">none</span>
+      </div>
+      <div class="bar"><div id="intensityBar"></div></div>
+      <div class="range-info" id="rangeInfo"></div>
+    </div>
+    <div class="log-head" id="logHead">
+      <h2>OSC sent</h2>
+      <span id="oscCount"></span>
+      <button type="button" id="oscClear">clear</button>
+    </div>
+    <div id="oscLog"><span id="oscEmpty">waiting for messages…</span></div>
+  </section>
+</div>
+
+<section id="debugPanel">
+  <h2>Debug scores</h2>
+  <div id="debugBody"></div>
+</section>
+
+<script>
+"use strict";
+
+// Matches the OpenCV HUD colours (those are BGR tuples; these are the RGB
+// they actually render as, so switching UIs doesn't change what you memorised).
+const MODE_COLORS = {
+  noop:   "#a0a0a0",
+  runs:   "#50c850",
+  chords: "#50c8c8",
+  faster: "#c8c850",
+  slower: "#dc5050",
+};
+
+const PRESET_KEYS = ["1", "2", "3", "4", "5"];
+
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17],
+];
+
+const MAX_LOG_ROWS = 40;      // matches the server's buffer cap
+
+// One colour per OSC message type. The gesture addresses reuse the HUD's mode
+// colours so the log and the readout agree.
+const OSC_COLORS = {
+  "/setManualPause": "#e0864f",
+  "/playRuns":       "#50c850",
+  "/playChords":     "#50c8c8",
+  "/adjustTempo":    "#c8c850",
+  "/resetControl":   "#a893d8",
+};
+
+// /setOutputRange is split further by which instrument it targets: the
+// four-argument form is the piano, the five-argument form leads with the
+// instrument position (1 strings, 2 brass).
+const RANGE_COLORS = {
+  piano: "#6cbfff",      // the four-argument form
+  0:     "#6cbfff",      // ...and the piano's own index, same colour
+  1:     "#e891d8",      // strings
+  2:     "#f5a73c",      // brass
+};
+
+const OSC_FALLBACK = "#b9b9b9";
+
+function oscColor(e) {
+  if (e.addr === "/setOutputRange") {
+    const key = e.args.length >= 5 ? e.args[0] : "piano";
+    return RANGE_COLORS[key] || OSC_FALLBACK;
+  }
+  return OSC_COLORS[e.addr] || OSC_FALLBACK;
+}
+
+const $ = (id) => document.getElementById(id);
+const stage = $("stage");
+const canvas = $("lm");
+const ctx = canvas.getContext("2d");
+const logEl = $("oscLog");
+
+let state = null;
+let presetsBuilt = false;
+let oscSeq = 0;               // last OSC seq we've rendered
+let oscTotal = 0;
+
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// ---------------------------------------------------------------- control
+
+async function send(payload) {
+  try {
+    const res = await fetch("/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    // Skip the OSC block: this response deliberately carries none, and the
+    // poll owns the log's sequence tracking.
+    apply(data, { osc: false });
+    showError(null);
+  } catch (e) {
+    showError("Control failed: " + e.message);
+  }
+}
+
+function showError(msg) {
+  const el = $("err");
+  el.textContent = msg || "";
+  el.classList.toggle("on", !!msg);
+  $("cam").classList.toggle("offline", !!msg);
+}
+
+// ---------------------------------------------------------------- presets
+
+function buildPresets(names) {
+  const wrap = $("presets");
+  wrap.innerHTML = "";
+  names.forEach((name, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.preset = name;
+    b.setAttribute("aria-pressed", "false");
+    b.innerHTML = `${esc(name)}<span class="key">key ${PRESET_KEYS[i] || "–"}</span>`;
+    b.addEventListener("click", () => send({ preset: name }));
+    wrap.appendChild(b);
+  });
+  presetsBuilt = true;
+}
+
+// ---------------------------------------------------------------- OSC log
+
+function fmtTime(epochSeconds) {
+  const d = new Date(epochSeconds * 1000);
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}` +
+         `.${p(d.getMilliseconds(), 3)}`;
+}
+
+function appendOsc(entries) {
+  if (!entries || !entries.length) return;
+  const empty = $("oscEmpty");
+  if (empty) empty.remove();
+
+  // Only keep following the tail if the user hasn't scrolled up to read.
+  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 28;
+
+  const frag = document.createDocumentFragment();
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "osc-row" + (e.error ? " err" : "");
+    // Failures keep the red from CSS; everything else is typed by colour.
+    if (!e.error) row.style.color = oscColor(e);
+    const args = e.args.length ? ` <span class="args">${esc(e.args.join(" "))}</span>` : "";
+    const err = e.error ? ` <span class="msg">— ${esc(e.error)}</span>` : "";
+    row.innerHTML = `<span class="ts">${fmtTime(e.t)}</span> ` +
+                    `<span class="addr">${esc(e.addr)}</span>${args}${err}`;
+    frag.appendChild(row);
+  }
+  logEl.appendChild(frag);
+
+  oscTotal += entries.length;
+  $("oscCount").textContent = oscTotal + " msg";
+
+  while (logEl.childElementCount > MAX_LOG_ROWS) logEl.removeChild(logEl.firstChild);
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+}
+
+// Size the log to whatever the right column has left over once the gesture
+// block is placed. The target comes from the *stage* height, which is
+// intrinsic to the video, so this can't feed back into the grid row height.
+function syncLogHeight() {
+  const stageH = stage.getBoundingClientRect().height;
+  if (stageH < 80) return;
+  const rowInner = stageH + $("stageHint").getBoundingClientRect().height + 10;
+  const used = $("gestureBlock").getBoundingClientRect().height
+             + $("logHead").getBoundingClientRect().height;
+  logEl.style.maxHeight = Math.max(120, Math.round(rowInner - used - 12)) + "px";
+}
+if (window.ResizeObserver) new ResizeObserver(syncLogHeight).observe(stage);
+window.addEventListener("resize", syncLogHeight);
+$("cam").addEventListener("load", syncLogHeight);
+
+$("oscClear").addEventListener("click", async () => {
+  await send({ clear_osc: true });
+  logEl.innerHTML = '<span id="oscEmpty">waiting for messages…</span>';
+  oscTotal = 0;
+  $("oscCount").textContent = "";
+});
+
+// ---------------------------------------------------------------- geometry
+
+const HANDLE_PX = 12;
+// handle id -> the /control key that commits it
+const HANDLE_KEY = {
+  excl:   "active_area",
+  split:  "orchestra_split",
+  column: "orchestra_column",
+};
+
+// Non-null while a bar is being dragged: { id, value }. Its value overrides
+// the polled state so a 10 Hz response can't fight the pointer.
+let drag = null;
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function geom() {
+  const s = state || {};
+  const pick = (id, fallback) =>
+    drag && drag.id === id ? drag.value : (s[HANDLE_KEY[id]] ?? fallback);
+  return {
+    excl:      pick("excl", 0.75),
+    split:     pick("split", 0.375),
+    column:    pick("column", 0.5),
+    orchestra: !!s.orchestra,
+  };
+}
+
+function renderGeometry() {
+  const g = geom();
+  const exclPct = g.excl * 100;
+  $("excl").style.top = exclPct + "%";
+  $("exclLabel").textContent = `Active ${Math.round(exclPct)}%`;
+
+  $("regions").hidden = !g.orchestra;
+  if (!g.orchestra) return;
+
+  const splitPct = g.split * 100;
+  const colPct = g.column * 100;
+  $("splitBar").style.top = splitPct + "%";
+  $("colBar").style.left = colPct + "%";
+  $("colBar").style.height = splitPct + "%";
+
+  // brass / strings sit just above the split bar, piano just below it.
+  $("labBrass").style.cssText   = `left:8px; top:calc(${splitPct}% - 19px)`;
+  $("labStrings").style.cssText = `left:calc(${colPct}% + 8px); top:calc(${splitPct}% - 19px)`;
+  $("labPiano").style.cssText   = `left:8px; top:calc(${splitPct}% + 6px)`;
+
+  const live = new Set(state?.active_regions || []);
+  for (const [id, name] of [["labBrass", "brass"], ["labStrings", "strings"],
+                            ["labPiano", "piano"]]) {
+    $(id).classList.toggle("live", live.has(name));
+  }
+}
+
+function hitTest(e) {
+  const r = stage.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  const g = geom();
+  const cands = [];
+
+  // The exclusion boundary stays grabbable from anywhere in the red region.
+  const exclY = g.excl * r.height;
+  if (y >= exclY - HANDLE_PX) cands.push({ id: "excl", d: Math.abs(y - exclY) });
+
+  if (g.orchestra) {
+    const splitY = g.split * r.height;
+    const colX = g.column * r.width;
+    if (Math.abs(y - splitY) <= HANDLE_PX)
+      cands.push({ id: "split", d: Math.abs(y - splitY) });
+    // The column bar only exists above the split.
+    if (y < splitY + HANDLE_PX && Math.abs(x - colX) <= HANDLE_PX)
+      cands.push({ id: "column", d: Math.abs(x - colX) });
+  }
+
+  if (!cands.length) return null;
+  cands.sort((a, b) => a.d - b.d);       // nearest bar wins when they overlap
+  return cands[0].id;
+}
+
+function valueFromPointer(id, e) {
+  const r = stage.getBoundingClientRect();
+  if (id === "column") return clamp((e.clientX - r.left) / r.width, 0.05, 0.95);
+  const y = (e.clientY - r.top) / r.height;
+  if (id === "excl") return clamp(y, 0.10, 0.95);
+  // The server stores the split as a fraction of the active region and clamps
+  // it to 10-90%; mirroring that here stops the bar jumping on commit.
+  const excl = geom().excl;
+  return clamp(y, excl * 0.10, excl * 0.90);
+}
+
+stage.addEventListener("pointerdown", (e) => {
+  const id = hitTest(e);
+  if (!id) return;
+  drag = { id, value: valueFromPointer(id, e) };
+  stage.classList.add("drag-" + id);
+  stage.setPointerCapture(e.pointerId);
+  renderGeometry();
+  e.preventDefault();
+});
+
+stage.addEventListener("pointermove", (e) => {
+  if (!drag) {
+    const id = hitTest(e);
+    stage.style.cursor = !id ? "default" : id === "column" ? "ew-resize" : "ns-resize";
+    return;
+  }
+  drag.value = valueFromPointer(drag.id, e);
+  renderGeometry();
+  e.preventDefault();
+});
+
+function endDrag() {
+  if (!drag) return;
+  const { id, value } = drag;
+  drag = null;
+  stage.classList.remove("drag-excl", "drag-split", "drag-column");
+  send({ [HANDLE_KEY[id]]: value });
+}
+stage.addEventListener("pointerup", endDrag);
+stage.addEventListener("pointercancel", endDrag);
+
+// ---------------------------------------------------------------- toggles
+
+$("landmarks").addEventListener("change", (e) =>
+  send({ draw_landmarks: e.target.checked }));
+$("debug").addEventListener("change", (e) =>
+  send({ debug: e.target.checked }));
+$("orchestra").addEventListener("change", (e) =>
+  send({ orchestra: e.target.checked }));
+
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target instanceof HTMLInputElement) return;
+  const i = PRESET_KEYS.indexOf(e.key);
+  if (i >= 0 && state && state.presets[i]) {
+    send({ preset: state.presets[i] });
+  } else if (e.key === "l" || e.key === "L") {
+    send({ draw_landmarks: !state?.draw_landmarks });
+  } else if (e.key === "d" || e.key === "D") {
+    send({ debug: !state?.debug });
+  } else if (e.key === "o" || e.key === "O") {
+    send({ orchestra: !state?.orchestra });
+  }
+});
+
+// ---------------------------------------------------------------- landmarks
+
+function drawLandmarks(hands) {
+  const rect = stage.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(rect.width), h = Math.round(rect.height);
+  if (!w || !h) return;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!hands || !hands.length) return;
+
+  for (const pts of hands) {
+    ctx.strokeStyle = "#f22";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (const [a, b] of HAND_CONNECTIONS) {
+      if (!pts[a] || !pts[b]) continue;
+      ctx.moveTo(pts[a][0] * w, pts[a][1] * h);
+      ctx.lineTo(pts[b][0] * w, pts[b][1] * h);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "#2f2";
+    for (const p of pts) {
+      ctx.beginPath();
+      ctx.arc(p[0] * w, p[1] * h, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// ---------------------------------------------------------------- debug
+
+function row(label, value, cmp, threshold, digits = 3) {
+  const pass = cmp === undefined ? null
+             : cmp === "gte" ? value >= threshold
+             : value < threshold;
+  const cls = pass === null ? "" : pass ? "ok" : "fail";
+  const op = cmp === "gte" ? "≥" : "<";
+  const thr = cmp === undefined ? "" : `${op} ${threshold}`;
+  return `<tr class="${cls}"><td>${label}</td>` +
+         `<td class="v">${Number(value ?? 0).toFixed(digits)}</td>` +
+         `<td class="t">${thr}</td></tr>`;
+}
+
+function renderDebug(scores, T) {
+  if (!scores || !T) { $("debugBody").innerHTML = ""; return; }
+  $("debugBody").innerHTML = scores.map((s, i) => {
+    if (s.tip_artic === null || s.tip_artic === undefined) {
+      return `<div class="hand"><h3>Hand ${i}</h3>
+              <p style="color:#666;font-size:0.8rem">no data</p></div>`;
+    }
+    const fasterArmed = s.index_ext >= T.index_ext &&
+                        s.others_dist_max < T.others_dist_ratio &&
+                        s.index_hold >= T.index_hold;
+    return `<div class="hand">
+      <h3>Hand ${i}</h3>
+      <table>
+        ${row("tip_artic", s.tip_artic, "gte", T.run_tip_artic)}
+        ${row("ext_change", s.ext_change, "gte", T.run_ext, 2)}
+        ${row("tip_disp", s.tip_disp, "gte", T.chord_tip_disp)}
+        ${row("index_ext", s.index_ext, "gte", T.index_ext, 2)}
+        ${row("others_dist", s.others_dist_max, "lt", T.others_dist_ratio)}
+        ${row("index_hold", s.index_hold, "gte", T.index_hold, 2)}
+        ${row("ang_vel", s.ang_vel, "gte", T.rotate, 2)}
+        ${row("mean_ext", s.mean_ext, "gte", T.open, 2)}
+        ${row("fist_intensity", s.fist_intensity, undefined, null, 2)}
+      </table>
+      <div class="verdict">
+        <span class="chip ${s.is_run ? "on" : ""}">run</span>
+        <span class="chip ${s.is_chord ? "on" : ""}">chord</span>
+        <span class="chip ${fasterArmed && s.ang_vel >= T.rotate ? "on" : ""}">faster</span>
+        <span class="chip ${s.fist_pending ? "on" : ""}">fist pending</span>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+// ---------------------------------------------------------------- state
+
+function apply(s, opts = {}) {
+  state = s;
+
+  if (!presetsBuilt) buildPresets(s.presets);
+  for (const b of $("presets").children) {
+    b.setAttribute("aria-pressed", String(b.dataset.preset === s.preset));
+  }
+
+  renderGeometry();
+
+  const color = MODE_COLORS[s.mode] || MODE_COLORS.noop;
+  $("mode").textContent = s.mode;
+  $("mode").style.color = color;
+  $("intensityVal").textContent = s.intensity.toFixed(2);
+  $("intensityBar").style.width = (s.intensity * 100) + "%";
+  $("intensityBar").style.background = color;
+
+  $("sent").textContent = s.last_sent;
+  $("sent").style.color = MODE_COLORS[s.last_sent.split(" ")[0]] || "#888";
+
+  $("fps").textContent = s.fps.toFixed(1) + " fps";
+  $("handDot").classList.toggle("on", s.hand_present);
+
+  const [lo, hi] = s.interval;
+  $("rangeInfo").textContent =
+    `output range   L ${s.left_val + lo}–${s.left_val + hi}` +
+    `   R ${s.right_val + lo}–${s.right_val + hi}`;
+
+  if ($("landmarks") !== document.activeElement) $("landmarks").checked = s.draw_landmarks;
+  if ($("debug") !== document.activeElement) $("debug").checked = s.debug;
+  if ($("orchestra") !== document.activeElement) $("orchestra").checked = s.orchestra;
+
+  $("debugPanel").classList.toggle("on", s.debug);
+  if (s.debug) renderDebug(s.debug_scores, s.thresholds);
+  drawLandmarks(s.hands);
+
+  if (opts.osc !== false) {
+    appendOsc(s.osc);
+    if (typeof s.osc_seq === "number") oscSeq = s.osc_seq;
+  }
+}
+
+async function poll() {
+  try {
+    const res = await fetch("/state?osc_since=" + oscSeq, { cache: "no-store" });
+    if (!res.ok) throw new Error(res.statusText);
+    apply(await res.json());
+    showError(null);
+  } catch (e) {
+    showError("Lost contact with the app — is it still running?");
+  }
+}
+
+poll();
+setInterval(poll, 100);
+
+// The MJPEG connection drops on network hiccups or when the app restarts;
+// re-point the img so the preview comes back without a manual reload.
+$("cam").addEventListener("error", () => {
+  setTimeout(() => { $("cam").src = "/stream?t=" + Date.now(); }, 1000);
+});
+</script>
+</body>
+</html>

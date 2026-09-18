@@ -7,8 +7,8 @@ from mediapipe.python.solutions import drawing_utils as mp_drawing
 
 class HandLandmarkDrawer:
     @staticmethod
-    def draw_landmarks(image, detection_result, hand_indices=None):
-        annotated_image = np.copy(image)
+    def draw_landmarks(image, detection_result, hand_indices=None, copy=True):
+        annotated_image = np.copy(image) if copy else image
         if detection_result and hasattr(detection_result, "hand_landmarks") and detection_result.hand_landmarks:
             indices = hand_indices if hand_indices is not None else range(len(detection_result.hand_landmarks))
             for i in indices:
@@ -32,6 +32,8 @@ class HandTracker:
         self.model_path = model_path
         self.camera_index = camera_index
         self.cap = cv2.VideoCapture(self.camera_index)
+        self._rgb = None      # reusable detection buffer, sized on first frame
+        self._last_ts = 0     # monotonic watermark for MediaPipe timestamps
         self._init_landmarker(use_gpu)
 
     def _init_landmarker(self, use_gpu):
@@ -50,19 +52,38 @@ class HandTracker:
         )
         self.landmarker = HandLandmarker.create_from_options(options)
 
+    def _next_timestamp(self):
+        """Strictly-increasing millisecond timestamp.
+
+        MediaPipe's VIDEO running mode rejects a timestamp that is not greater
+        than the previous one, which wall-clock milliseconds hit as soon as two
+        frames land inside the same millisecond.
+        """
+        ts = int(time.monotonic() * 1000)
+        if ts <= self._last_ts:
+            ts = self._last_ts + 1
+        self._last_ts = ts
+        return ts
+
     def get_frame_and_landmarks(self, active_area_ratio=1.0):
         ret, frame = self.cap.read()
         if not ret:
             return None, None
         frame = cv2.flip(frame, 1)
-        detection_frame = frame.copy()
-        exclusion_y = int(detection_frame.shape[0] * active_area_ratio)
-        if exclusion_y < detection_frame.shape[0]:
-            detection_frame[exclusion_y:, :] = 0
-        frame_rgba = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGBA)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGBA, data=frame_rgba)
-        timestamp = int(time.time() * 1000)
-        results = self.landmarker.detect_for_video(mp_image, timestamp)
+
+        # Convert straight into a reused RGB buffer and mask the excluded strip
+        # there. Detection then costs one 3-channel conversion per frame rather
+        # than a full-frame copy plus a 4-channel one.
+        h, w = frame.shape[:2]
+        if self._rgb is None or self._rgb.shape[:2] != (h, w):
+            self._rgb = np.empty((h, w, 3), dtype=np.uint8)
+        cv2.cvtColor(frame, cv2.COLOR_BGR2RGB, dst=self._rgb)
+        exclusion_y = int(h * active_area_ratio)
+        if exclusion_y < h:
+            self._rgb[exclusion_y:, :] = 0
+
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=self._rgb)
+        results = self.landmarker.detect_for_video(mp_image, self._next_timestamp())
         return frame, results
 
     def close(self):
