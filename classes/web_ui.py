@@ -79,6 +79,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": f"cannot read {_UI_FILE}: {e}"}, 500)
         elif path == "/state":
             self._send_json(self.app.web_state(osc_since=self._osc_since()))
+        elif path == "/cameras":
+            # Slow (it opens every capture device), which is why it's its own
+            # route rather than part of the 10 Hz /state poll.
+            refresh = parse_qs(urlparse(self.path).query).get("refresh")
+            self._send_json(self.app.camera_options(refresh=bool(refresh)))
         elif path == "/stream":
             self._stream_mjpeg()
         else:

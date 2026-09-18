@@ -36,11 +36,25 @@ your browser. The main row is three columns:
 | Column | Contents |
 |---|---|
 | Left | Preset buttons (`1`–`5`), orchestra (`o`) and piano-only (`p`) toggles, landmark/debug toggles |
-| Centre | Camera preview with the draggable piano split and exclusion boundary |
+| Centre | Camera preview with the camera picker, draggable piano split and exclusion boundary |
 | Right | Gesture readout and range bars on top, live OSC log below |
 
 The debug-score panel sits full-width underneath. On a narrow screen the three
 columns stack.
+
+### Camera selection
+
+A picker floats over the top-left of the preview. It lists the capture devices
+found at startup — by name on macOS, as `Camera 0`, `Camera 1`… elsewhere —
+and picking one switches tracking to it. The swap happens on the gesture
+loop's next frame, and the new device is opened before the old one is let go,
+so a camera that won't open (unplugged, or held by another app) leaves the
+preview running and reports the failure next to the picker instead.
+
+Finding cameras means opening every device in turn, so the list is built once
+and cached. Press **⟳** to rescan after plugging one in. The picker is greyed
+out when only one camera was found; rescanning re-enables it. The legacy
+OpenCV window (`--ui cv2`) has no equivalent and always uses device 0.
 
 ### Range bars
 

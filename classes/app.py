@@ -7,7 +7,7 @@ import collections
 import cv2
 import numpy as np
 from pythonosc import udp_client
-from .tracker import HandTracker, HandLandmarkDrawer
+from .tracker import HandTracker, HandLandmarkDrawer, list_cameras
 from .gesture_detector import GestureDetector
 from .gesture_sender import GestureSender
 import gc
@@ -314,6 +314,11 @@ class OSCGestureApp:
         self._latest_frame = None
         self._latest_hands = []
         self._frame_seq    = 0
+
+        # Probing capture devices takes seconds, so the list the web UI
+        # offers is built once on demand and only rebuilt when asked.
+        self._camera_lock  = threading.Lock()
+        self._camera_cache = None
 
         self.fps = 0.0
         self._last_frame_time = None
@@ -1063,6 +1068,21 @@ class OSCGestureApp:
             })
         return bars
 
+    def camera_options(self, refresh=False):
+        """Cameras the web UI can offer, plus which one is live.
+
+        Cached: enumerating means opening every device in turn. `refresh`
+        rebuilds it, which is how a camera plugged in after startup shows up.
+        """
+        with self._camera_lock:
+            if self._camera_cache is None or refresh:
+                self._camera_cache = list_cameras(
+                    in_use=self.hand_tracker.camera_index)
+            cameras = self._camera_cache
+        return {'cameras': cameras,
+                'current': self.hand_tracker.camera_index,
+                'error':   self.hand_tracker.camera_error}
+
     def web_state(self, osc_since=None):
         """Snapshot of everything the browser renders as HUD.
 
@@ -1099,6 +1119,8 @@ class OSCGestureApp:
             'hands':          hands,
             'osc':            osc_entries,
             'osc_seq':        osc_seq,
+            'camera':           self.hand_tracker.camera_index,
+            'camera_error':     self.hand_tracker.camera_error,
             'orchestra':        self.orchestra_mode,
             'piano_only':       self.piano_only,
             'orchestra_split':  round(self._orchestra_split_y(), 4),
@@ -1139,6 +1161,14 @@ class OSCGestureApp:
         if 'debug' in payload:
             self.debug_mode = bool(payload['debug'])
             print("Debug mode:", self.debug_mode)
+        if 'camera' in payload:
+            try:
+                index = int(payload['camera'])
+            except (TypeError, ValueError):
+                raise ValueError(f"bad camera index: {payload['camera']!r}")
+            if index < 0:
+                raise ValueError(f"bad camera index: {index}")
+            self.hand_tracker.request_camera(index)
         if 'orchestra' in payload:
             self._set_orchestra_mode(bool(payload['orchestra']))
         if 'piano_only' in payload:

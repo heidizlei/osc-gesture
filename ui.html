@@ -136,6 +136,40 @@
   #stage.drag-excl #excl { background: rgba(255, 100, 100, 0.4); }
   .hint { font-size: 0.75rem; color: #6e6e6e; margin-top: 10px; }
 
+  /* ---- camera picker, floating over the preview ---- */
+  #camPick {
+    position: absolute;
+    left: 8px; top: 8px;
+    display: flex; align-items: center; gap: 6px;
+    line-height: normal;            /* the stage zeroes it for the <img> */
+    padding: 5px 6px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    cursor: default;
+  }
+  #camPick select, #camPick button {
+    font: inherit;
+    font-size: 11px;
+    color: #e8e8e8;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 2px 4px;
+    cursor: pointer;
+  }
+  #camPick select { max-width: 190px; }
+  #camPick select:disabled { color: #888; cursor: default; }
+  #camPick button { width: 22px; padding: 2px 0; }
+  #camPick button:hover, #camPick select:hover:not(:disabled) { border-color: #777; }
+  #camErr {
+    font-size: 11px;
+    line-height: 1.5;
+    color: #f88;
+    max-width: 200px;
+  }
+  #camErr:empty { display: none; }
+
   /* ---- orchestra-mode dividers ---- */
   #regions { position: absolute; inset: 0; pointer-events: none; }
   #regions[hidden] { display: none; }
@@ -430,6 +464,13 @@
         <div class="rlabel" id="labBrass">brass · left hand</div>
         <div class="rlabel" id="labStrings">strings · right hand</div>
         <div class="rlabel" id="labPiano">piano</div>
+      </div>
+      <div id="camPick">
+        <select id="camSelect" title="camera used for tracking" disabled>
+          <option value="">finding cameras…</option>
+        </select>
+        <button type="button" id="camRefresh" title="rescan for cameras">⟳</button>
+        <span id="camErr"></span>
       </div>
     </div>
     <p class="hint" id="stageHint">Drag the red region to move the exclusion boundary. In
@@ -732,6 +773,7 @@ function valueFromPointer(id, e) {
 }
 
 stage.addEventListener("pointerdown", (e) => {
+  if (e.target.closest("#camPick")) return;   // the picker owns its own clicks
   const id = hitTest(e);
   if (!id) return;
   drag = { id, value: valueFromPointer(id, e) };
@@ -743,7 +785,7 @@ stage.addEventListener("pointerdown", (e) => {
 
 stage.addEventListener("pointermove", (e) => {
   if (!drag) {
-    const id = hitTest(e);
+    const id = e.target.closest("#camPick") ? null : hitTest(e);
     stage.style.cursor = id ? "ns-resize" : "default";
     return;
   }
@@ -761,6 +803,77 @@ function endDrag() {
 }
 stage.addEventListener("pointerup", endDrag);
 stage.addEventListener("pointercancel", endDrag);
+
+// ---------------------------------------------------------- camera picker
+
+// The switch is performed by the gesture loop on its next frame, so the
+// select would briefly snap back to the old camera if every poll resynced it.
+// Holding the requested index here keeps it put until the app agrees.
+let camPending = null;
+let camScanning = false;
+let camNames = new Map();          // index -> label from the last scan
+
+async function loadCameras(refresh = false) {
+  const sel = $("camSelect");
+  camScanning = true;              // keeps the poll from redrawing mid-scan
+  sel.disabled = true;
+  if (refresh) sel.innerHTML = '<option value="">scanning…</option>';
+  try {
+    const res = await fetch("/cameras" + (refresh ? "?refresh=1" : ""),
+                            { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    camNames = new Map(data.cameras.map((c) => [c.index, c.name]));
+    renderCameras(data.current);
+  } catch (e) {
+    sel.innerHTML = '<option value="">camera list unavailable</option>';
+    $("camErr").textContent = e.message;
+  } finally {
+    camScanning = false;
+  }
+}
+
+function renderCameras(current) {
+  const sel = $("camSelect");
+  // The live camera always appears, even if the scan missed it (it was in use
+  // when an older scan ran, or it sits past the probed range).
+  const indices = [...new Set([...camNames.keys(), current])]
+    .filter((i) => typeof i === "number").sort((a, b) => a - b);
+  sel.innerHTML = "";
+  for (const i of indices) {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = camNames.get(i) || `Camera ${i}`;
+    sel.appendChild(opt);
+  }
+  sel.value = String(current);
+  sel.disabled = indices.length < 2;
+  sel.title = indices.length < 2
+    ? "only one camera found — press ⟳ to rescan"
+    : "camera used for tracking";
+}
+
+$("camSelect").addEventListener("change", (e) => {
+  camPending = Number(e.target.value);
+  $("camErr").textContent = "";
+  send({ camera: camPending });
+});
+$("camRefresh").addEventListener("click", () => loadCameras(true));
+
+function syncCamera(s) {
+  if (typeof s.camera !== "number") return;
+  // A failed switch leaves s.camera on the old device; drop the pending
+  // request so the select stops waiting and shows what's actually running.
+  if (camPending !== null && (s.camera === camPending || s.camera_error)) {
+    camPending = null;
+  }
+  $("camErr").textContent = s.camera_error || "";
+  if (camPending === null && !camScanning &&
+      $("camSelect") !== document.activeElement &&
+      $("camSelect").value !== String(s.camera)) {
+    renderCameras(s.camera);
+  }
+}
 
 // ---------------------------------------------------------------- toggles
 
@@ -1025,6 +1138,7 @@ function apply(s, opts = {}) {
   if ($("orchestra") !== document.activeElement) $("orchestra").checked = s.orchestra;
   if ($("pianoOnly") !== document.activeElement) $("pianoOnly").checked = s.piano_only;
   $("pianoOnly").disabled = !s.orchestra;
+  syncCamera(s);
   $("pianoOnlyRow").classList.toggle("off", !s.orchestra);
 
   renderRanges(s);
@@ -1052,6 +1166,7 @@ async function poll() {
 
 poll();
 setInterval(poll, 100);
+loadCameras();
 
 // The MJPEG connection drops on network hiccups or when the app restarts;
 // re-point the img so the preview comes back without a manual reload.
