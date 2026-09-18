@@ -50,6 +50,14 @@ numbers are MIDI note numbers, one per octave). Each bar takes its
 instrument's colour from the OSC log, so a bar and the messages that moved it
 read as the same thing.
 
+The **window** slider above the bars sets how wide each instrument's output
+range is, from 1 semitone to 3 octaves (36), starting at 16 — the width the
+app has always used. The window stays centred on the pitch the hand maps to;
+an odd width puts the extra semitone above. Every range is clamped to valid
+MIDI, so a wide window near either end of the mapping flattens against 0 or
+127 rather than running past it. The OpenCV window has the same control as a
+**Range window st** trackbar.
+
 | Bar | Meaning |
 |---|---|
 | Solid | A hand is in that zone right now, driving the range |
@@ -60,6 +68,12 @@ The piano draws two bars when two hands are on it, one when a single hand is
 (the second slot goes out as `-1 -1`, so there's nothing to draw). Outside
 orchestra mode only the piano row exists. Hovering a row gives the exact
 numbers, and the text line underneath keeps the piano's `L`/`R` readout.
+
+The gesture readout above it is hidden in the `range` and `pedal-only`
+presets, which don't act on gestures at all — the detector still runs, but
+nothing downstream reads it, and showing its output would suggest otherwise.
+The same applies to the OpenCV window's gesture HUD. The debug-score panel is
+an explicit opt-in, so it still shows whatever you toggle it on for.
 
 ### OSC log
 

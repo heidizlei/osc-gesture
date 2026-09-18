@@ -64,6 +64,14 @@ _UNLABELLED_HAND_SPLIT = 0.5
 # when orchestra mode adds and removes the other two.
 _RANGE_BAR_ORDER = ('piano', 'brass', 'strings')
 
+# Widest output window the range slider allows, in semitones. Three octaves
+# is already far past what a hand position can usefully aim at.
+_MAX_RANGE_WINDOW = 36
+
+# Valid MIDI note numbers. A wide window around a pitch near either end of
+# the mapping would otherwise run past them.
+_MIDI_LOW, _MIDI_HIGH = 0, 127
+
 
 def _load_instrument_defaults(preset_path=None):
     """Map instrument index -> (midi_id, low, high) from an orchestra preset.
@@ -188,6 +196,7 @@ class _OSCLog:
 
 _WINDOW_NAME = "Hand Camera"
 _BOUNDARY_TRACKBAR = "Active area %"
+_WINDOW_TRACKBAR = "Range window st"
 
 
 class OSCGestureApp:
@@ -215,6 +224,8 @@ class OSCGestureApp:
                  port=9001,
                  preset="range",
                  orchestra_preset=None):
+        # Output window around the mapped pitch, as (low, high) offsets. Its
+        # width is what the range-window slider sets.
         self.interval = (-8, 8)
 
         # OSC client, wrapped so the web UI can show the same feed the
@@ -361,6 +372,39 @@ class OSCGestureApp:
             if self._hand_position(hand)[1] <= self.active_area_ratio
         ]
 
+    def _window_around(self, val):
+        """(low, high) output window around one mapped pitch, valid MIDI."""
+        lo, hi = self.interval
+        return (max(_MIDI_LOW, val + lo), min(_MIDI_HIGH, val + hi))
+
+    @property
+    def range_window(self):
+        """Width of the output window in semitones."""
+        return self.interval[1] - self.interval[0]
+
+    def _set_range_window(self, semitones):
+        """Resize the output window, keeping it centred on the mapped pitch.
+
+        An odd width can't split evenly, and the extra semitone goes above.
+        """
+        size = int(np.clip(int(semitones), 1, _MAX_RANGE_WINDOW))
+        if size == self.range_window:
+            return
+        self.interval = (-(size // 2), size - size // 2)
+        # Every live range is now stale by the amount the window changed.
+        self._reset_range_throttle()
+        print(f"Range window: {size} semitones {self.interval}")
+
+    @property
+    def gestures_used(self):
+        """Whether the current preset acts on gesture detection at all.
+
+        Only the tempo mode ticks the sender, so in range and pedal-only the
+        detector still runs but nothing downstream reads it — and showing its
+        output would suggest otherwise.
+        """
+        return self.mode == 'tempo'
+
     def _orchestra_split_y(self):
         """Absolute frame y of the piano / brass-strings divider."""
         return self.active_area_ratio * self.orchestra_split_ratio
@@ -466,6 +510,10 @@ class OSCGestureApp:
                           round(self.active_area_ratio * 100), 95,
                           self._handle_boundary_slider)
         cv2.setTrackbarMin(_BOUNDARY_TRACKBAR, _WINDOW_NAME, 10)
+        cv2.createTrackbar(_WINDOW_TRACKBAR, _WINDOW_NAME,
+                           self.range_window, _MAX_RANGE_WINDOW,
+                           self._set_range_window)
+        cv2.setTrackbarMin(_WINDOW_TRACKBAR, _WINDOW_NAME, 1)
         self._boundary_trackbar_ready = True
 
     def _handle_mouse(self, event, x, y, flags, param):
@@ -620,15 +668,13 @@ class OSCGestureApp:
             left_val = left_val if left_val is not None else self.left_val
             right_val = right_val if right_val is not None else self.right_val
 
-            arg1 = left_val + self.interval[0]
-            arg2 = left_val + self.interval[1]
+            arg1, arg2 = self._window_around(left_val)
             # right_val is None while only one hand is in frame: the second
             # slot goes out as -1 -1 rather than echoing the first.
             if right_val is None:
                 arg3 = arg4 = -1
             else:
-                arg3 = right_val + self.interval[0]
-                arg4 = right_val + self.interval[1]
+                arg3, arg4 = self._window_around(right_val)
 
         try:
             self.osc_client.send_message("/setOutputRange", [arg1, arg2, arg3, arg4])
@@ -811,7 +857,7 @@ class OSCGestureApp:
         self.gesture_result = self.gesture_detector.update(
             wl, time.time(), wrist_y=wy, image_landmarks=il)
         # Only tick the sender when a new report has been emitted
-        if self.gesture_result is not prev and self.mode == 'tempo':
+        if self.gesture_result is not prev and self.gestures_used:
             mode, intensity = self.gesture_result
             self.gesture_sender.tick(mode, intensity, self.osc_client)
 
@@ -922,8 +968,7 @@ class OSCGestureApp:
             return
         st['last_val']  = val
         st['last_time'] = now
-        self.send_instrument_range(instr, val + self.interval[0],
-                                   val + self.interval[1])
+        self.send_instrument_range(instr, *self._window_around(val))
 
     def _update_piano(self, positions):
         # Single hand -> first channel only; second slot is sent as -1 -1
@@ -989,7 +1034,6 @@ class OSCGestureApp:
         still shows where it's parked. Only the piano exists outside
         orchestra mode, so only it is reported there.
         """
-        lo_off, hi_off = self.interval
         regions = _RANGE_BAR_ORDER if self.orchestra_mode else ('piano',)
         bars = []
         for region in regions:
@@ -997,13 +1041,13 @@ class OSCGestureApp:
             live    = self._engaged[region]
             spans   = []
             if live and region == 'piano':
-                spans = [[val + lo_off, val + hi_off]
+                spans = [list(self._window_around(val))
                          for val in (self.left_val, self.right_val)
                          if val is not None]
             elif live:
                 val = self._instr_state[region]['last_val']
                 if val is not None:
-                    spans = [[val + lo_off, val + hi_off]]
+                    spans = [list(self._window_around(val))]
             if not spans:
                 # Never sounded, or reset on the way out: show the default.
                 default = self._instr_defaults.get(_REGION_INSTRUMENT[region])
@@ -1040,14 +1084,17 @@ class OSCGestureApp:
             'last_sent':      sent_mode if sent_level is None else f"{sent_mode} L{sent_level}",
             'active_area':    round(self.active_area_ratio, 3),
             'hand_present':   self.hand_present,
+            'gestures_used':  self.gestures_used,
             'draw_landmarks': self.draw_landmarks,
             'debug':          self.debug_mode,
             'fps':            round(self.fps, 1),
             'left_val':       self.left_val,
             'right_val':      self.right_val,
             'interval':       list(self.interval),
-            'pitch_bounds':   [self.min_val + self.interval[0],
-                               self.max_val + self.interval[1]],
+            'range_window':   self.range_window,
+            'range_window_max': _MAX_RANGE_WINDOW,
+            'pitch_bounds':   [self._window_around(self.min_val)[0],
+                               self._window_around(self.max_val)[1]],
             'ranges':         self._range_bars(),
             'hands':          hands,
             'osc':            osc_entries,
@@ -1084,6 +1131,8 @@ class OSCGestureApp:
             self._apply_preset(name)
         if 'active_area' in payload:
             self._set_active_area_ratio(float(payload['active_area']))
+        if 'range_window' in payload:
+            self._set_range_window(payload['range_window'])
         if 'draw_landmarks' in payload:
             self.draw_landmarks = bool(payload['draw_landmarks'])
             print("Draw landmarks:", self.draw_landmarks)
@@ -1139,7 +1188,10 @@ class OSCGestureApp:
         if self.draw_landmarks:
             HandLandmarkDrawer.draw_landmarks(
                 frame, results, active_hand_indices, copy=False)
-        self._draw_gesture_hud(frame, *self.gesture_result)
+        # The gesture readout only means something in a preset that acts on
+        # gestures; range and pedal-only ignore them entirely.
+        if self.gestures_used:
+            self._draw_gesture_hud(frame, *self.gesture_result)
         self._draw_preset_hud(frame)
         if self.debug_mode:
             self._draw_debug_hud(frame)

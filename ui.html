@@ -304,7 +304,19 @@
   /* ---- per-instrument range bars ----
      Each row takes its instrument's colour from the OSC log, so a bar and
      the messages that moved it read as the same thing. */
-  .rangebars { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
+  /* Window-width slider, laid out on the same label/track grid as the bars
+     below it so the two read as one block. */
+  .rw-row { display: grid; grid-template-columns: 46px minmax(0, 1fr) 30px;
+            gap: 8px; align-items: center; margin-bottom: 7px; }
+  .rw-row label { font-size: 0.68rem; color: var(--dim); text-align: right; }
+  .rw-row input { width: 100%; height: 13px; margin: 0; accent-color: #fb3; cursor: pointer; }
+  .rw-row span { font-size: 0.63rem; color: #6f6f6f; font-variant-numeric: tabular-nums; }
+
+  .rangebars { display: flex; flex-direction: column; gap: 3px; }
+  /* The gesture readout sits above this and goes away in the presets that
+     ignore gestures, so the heading carries the spacing. */
+  #rangeHead { margin-top: 14px; }
+  #gestureReadout[hidden] + #rangeHead { margin-top: 0; }
   .rb-row { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 8px;
             align-items: center; }
   .rb-name { font-size: 0.68rem; color: var(--dim); text-align: right;
@@ -427,13 +439,21 @@
 
   <section>
     <div id="gestureBlock">
-      <h2>Gesture</h2>
-      <div class="readout">
-        <span id="mode">noop</span>
-        <span id="intensityVal">0.00</span>
-        <span id="sent">none</span>
+      <div id="gestureReadout">
+        <h2>Gesture</h2>
+        <div class="readout">
+          <span id="mode">noop</span>
+          <span id="intensityVal">0.00</span>
+          <span id="sent">none</span>
+        </div>
+        <div class="bar"><div id="intensityBar"></div></div>
       </div>
-      <div class="bar"><div id="intensityBar"></div></div>
+      <h2 id="rangeHead">Output range</h2>
+      <div class="rw-row">
+        <label for="rangeWindow">window</label>
+        <input type="range" id="rangeWindow" min="1" max="36" step="1" value="16">
+        <span id="rangeWindowVal">16 st</span>
+      </div>
       <div class="rangebars" id="rangeBars"></div>
       <div class="range-info" id="rangeInfo"></div>
     </div>
@@ -744,6 +764,14 @@ stage.addEventListener("pointercancel", endDrag);
 
 // ---------------------------------------------------------------- toggles
 
+// Label follows the drag; the value is committed on release, like the
+// draggable bars over the preview.
+$("rangeWindow").addEventListener("input", (e) => {
+  $("rangeWindowVal").textContent = e.target.value + " st";
+});
+$("rangeWindow").addEventListener("change", (e) =>
+  send({ range_window: Number(e.target.value) }));
+
 $("landmarks").addEventListener("change", (e) =>
   send({ draw_landmarks: e.target.checked }));
 $("debug").addEventListener("change", (e) =>
@@ -954,15 +982,24 @@ function apply(s, opts = {}) {
 
   renderGeometry();
 
-  const color = MODE_COLORS[s.mode] || MODE_COLORS.noop;
-  $("mode").textContent = s.mode;
-  $("mode").style.color = color;
-  $("intensityVal").textContent = s.intensity.toFixed(2);
-  $("intensityBar").style.width = (s.intensity * 100) + "%";
-  $("intensityBar").style.background = color;
+  // The range and pedal-only presets ignore gestures, so their readout would
+  // be showing numbers nothing acts on.
+  const gestures = s.gestures_used !== false;
+  if ($("gestureReadout").hidden === gestures) {
+    $("gestureReadout").hidden = !gestures;
+    syncLogHeight();                 // the log fills whatever space is left
+  }
+  if (gestures) {
+    const color = MODE_COLORS[s.mode] || MODE_COLORS.noop;
+    $("mode").textContent = s.mode;
+    $("mode").style.color = color;
+    $("intensityVal").textContent = s.intensity.toFixed(2);
+    $("intensityBar").style.width = (s.intensity * 100) + "%";
+    $("intensityBar").style.background = color;
 
-  $("sent").textContent = s.last_sent;
-  $("sent").style.color = MODE_COLORS[s.last_sent.split(" ")[0]] || "#888";
+    $("sent").textContent = s.last_sent;
+    $("sent").style.color = MODE_COLORS[s.last_sent.split(" ")[0]] || "#888";
+  }
 
   $("fps").textContent = s.fps.toFixed(1) + " fps";
   $("handDot").classList.toggle("on", s.hand_present);
@@ -974,6 +1011,14 @@ function apply(s, opts = {}) {
   $("rangeInfo").textContent =
     `output range   L ${s.left_val + lo}–${s.left_val + hi}` +
     `   R ${rightRange}`;
+
+  if (typeof s.range_window_max === "number") {
+    $("rangeWindow").max = s.range_window_max;
+  }
+  if ($("rangeWindow") !== document.activeElement) {
+    $("rangeWindow").value = s.range_window;
+    $("rangeWindowVal").textContent = s.range_window + " st";
+  }
 
   if ($("landmarks") !== document.activeElement) $("landmarks").checked = s.draw_landmarks;
   if ($("debug") !== document.activeElement) $("debug").checked = s.debug;
