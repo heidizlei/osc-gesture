@@ -342,7 +342,9 @@
      the messages that moved it read as the same thing. */
   /* Window-width slider, laid out on the same label/track grid as the bars
      below it so the two read as one block. */
-  .rw-row { display: grid; grid-template-columns: 46px minmax(0, 1fr) 30px;
+  /* The third column is as wide as the two note boxes below it put
+     together, so the slider track lines up with the bar tracks. */
+  .rw-row { display: grid; grid-template-columns: 46px minmax(0, 1fr) 88px;
             gap: 8px; align-items: center; margin-bottom: 7px; }
   .rw-row label { font-size: 0.68rem; color: var(--dim); text-align: right; }
   .rw-row input { width: 100%; height: 13px; margin: 0; accent-color: #fb3; cursor: pointer; }
@@ -353,8 +355,8 @@
      ignore gestures, so the heading carries the spacing. */
   #rangeHead { margin-top: 14px; }
   #gestureReadout[hidden] + #rangeHead { margin-top: 0; }
-  .rb-row { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 8px;
-            align-items: center; }
+  .rb-row { display: grid; grid-template-columns: 46px minmax(0, 1fr) 40px 40px;
+            gap: 8px; align-items: center; }
   .rb-name { font-size: 0.68rem; color: var(--dim); text-align: right;
              overflow: hidden; text-overflow: ellipsis; }
   .rb-track { position: relative; height: 13px; border-radius: 3px;
@@ -365,9 +367,24 @@
   /* Parked at its preset default: a thin dim line, so a live instrument is
      the only thing that reads as solid. */
   .rb-row.idle .rb-span { top: 5px; bottom: 5px; opacity: 0.25; }
-  /* Not in the active list — piano-only excludes it, so it can't sound. */
-  .rb-row.off { opacity: 0.28; }
+  /* Not in the active list — piano-only excludes it, so it can't sound.
+     The dimming stops at the note boxes: they stay editable while the
+     instrument is out, so they have to stay readable too. */
+  .rb-row.off .rb-name, .rb-row.off .rb-track { opacity: 0.28; }
   .rb-row.off .rb-name { text-decoration: line-through; }
+  /* Lowest and highest note the instrument plays. Editing one re-maps that
+     instrument's whole span, so these are the range, not a display filter. */
+  .rb-num {
+    width: 100%; box-sizing: border-box; height: 17px; padding: 1px 2px;
+    background: #191919; color: #ddd; border: 1px solid #343434;
+    border-radius: 3px; font: inherit; font-size: 0.63rem; text-align: center;
+    font-variant-numeric: tabular-nums; -moz-appearance: textfield;
+  }
+  .rb-num::-webkit-outer-spin-button,
+  .rb-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .rb-num:focus { outline: none; border-color: currentColor; color: #fff; }
+  .rb-cap { font-size: 0.6rem; color: #5a5a5a; text-align: center; }
+
   .rb-axis { margin-top: 1px; }
   .rb-scale { position: relative; height: 10px; }
   .rb-scale span { position: absolute; top: 0; transform: translateX(-50%);
@@ -1296,12 +1313,37 @@ function renderDebug(scores, T) {
 // Rows are rebuilt only when the instrument set changes — orchestra mode
 // adding or removing brass and strings — so the spans can animate between
 // polls instead of being replaced ten times a second.
-let rbRows = new Map();        // instrument -> { row, track, spans: [div] }
+let rbRows = new Map();        // instrument -> { row, track, spans, low, high }
 let rbSig  = null;
 
 const pitchPct = (v, lo, hi) => ((v - lo) / (hi - lo)) * 100;
 
-function buildRangeBars(entries, lo, hi) {
+// The note boxes. Committed on change rather than on every keystroke, so a
+// half-typed number never reaches the server -- and Enter blurs, which both
+// commits and lets the next poll write the clamped value back in.
+function noteBox(instr, which, limits) {
+  const el = document.createElement("input");
+  el.type = "number";
+  el.className = "rb-num";
+  el.min = limits[0];
+  el.max = limits[1];
+  el.title = `${which === "low" ? "lowest" : "highest"} note ${instr} plays`;
+  el.addEventListener("change", () => commitNoteBoxes(instr));
+  el.addEventListener("keydown", (e) => { if (e.key === "Enter") el.blur(); });
+  return el;
+}
+
+function commitNoteBoxes(instr) {
+  const r = rbRows.get(instr);
+  if (!r) return;
+  const low = parseInt(r.low.value, 10);
+  const high = parseInt(r.high.value, 10);
+  // Unreadable in either box: let the next poll put the real values back.
+  if (isNaN(low) || isNaN(high)) { rbSig = null; return; }
+  send({ instr_range: { [instr]: [low, high] } });
+}
+
+function buildRangeBars(entries, lo, hi, limits) {
   const host = $("rangeBars");
   host.innerHTML = "";
   rbRows = new Map();
@@ -1326,9 +1368,12 @@ function buildRangeBars(entries, lo, hi) {
       track.appendChild(tick);
     }
 
-    row.append(name, track);
+    const low = noteBox(e.instr, "low", limits);
+    const high = noteBox(e.instr, "high", limits);
+
+    row.append(name, track, low, high);
     host.appendChild(row);
-    rbRows.set(e.instr, { row, track, spans: [] });
+    rbRows.set(e.instr, { row, track, spans: [], low, high });
   }
 
   // Octave numbers under the tracks, every other one so they don't collide.
@@ -1343,8 +1388,22 @@ function buildRangeBars(entries, lo, hi) {
     tag.textContent = midi;
     scale.appendChild(tag);
   }
-  axis.append(document.createElement("div"), scale);
+  const cap = (text) => {
+    const el = document.createElement("div");
+    el.className = "rb-cap";
+    el.textContent = text;
+    return el;
+  };
+  axis.append(document.createElement("div"), scale, cap("low"), cap("high"));
   host.appendChild(axis);
+}
+
+// Leave a box the user is typing in alone; the poll would otherwise
+// overwrite it ten times a second.
+function setNoteBox(el, value) {
+  if (el !== document.activeElement && el.value !== String(value)) {
+    el.value = value;
+  }
 }
 
 function renderRanges(s) {
@@ -1353,13 +1412,18 @@ function renderRanges(s) {
   if (!entries.length || hi <= lo) { $("rangeBars").innerHTML = ""; rbSig = null; return; }
 
   const sig = entries.map((e) => `${e.instr}:${e.id}`).join(",") + `|${lo}-${hi}`;
-  if (sig !== rbSig) { buildRangeBars(entries, lo, hi); rbSig = sig; }
+  if (sig !== rbSig) {
+    buildRangeBars(entries, lo, hi, s.range_limits || [0, 127]);
+    rbSig = sig;
+  }
 
   for (const e of entries) {
     const r = rbRows.get(e.instr);
     if (!r) continue;
     r.row.classList.toggle("idle", !e.live);
     r.row.classList.toggle("off", !e.active);
+    setNoteBox(r.low, e.low);
+    setNoteBox(r.high, e.high);
 
     while (r.spans.length < e.spans.length) {
       const bar = document.createElement("div");
@@ -1378,7 +1442,7 @@ function renderRanges(s) {
 
     const where = e.spans.map((sp) => sp.join("–")).join("  ") || "—";
     r.row.title = `${e.instr} (id ${e.id}) ${where}` +
-      (e.active ? (e.live ? "" : "  · parked at default") : "  · not active");
+      (e.active ? (e.live ? "" : "  · parked on its range") : "  · not active");
   }
 }
 
@@ -1539,9 +1603,12 @@ for (const [v, ui] of Object.entries(VIEW_UI)) {
 
 // ---------------------------------------------------------------- mock hands
 
+// Where the circles sit before the first state arrives; the server's own
+// starting positions (OSCGestureApp.mock_hands) are the same, low in the
+// excluded region so nothing is driven until one is dragged up.
 const MOCK_HANDS = [
-  { id: "mockHandL", label: "Left",  home: [0.30, 0.55] },
-  { id: "mockHandR", label: "Right", home: [0.70, 0.55] },
+  { id: "mockHandL", label: "Left",  home: [0.30, 0.88] },
+  { id: "mockHandR", label: "Right", home: [0.70, 0.88] },
 ];
 
 // Set while a circle is under the pointer. Like the bar drag, it overrides

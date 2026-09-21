@@ -26,7 +26,7 @@ python main.py --host <ip> --port <port>
 | `--http-host` | `127.0.0.1` | Web UI bind address; `0.0.0.0` to reach it from a phone/tablet |
 | `--http-port` | `8765` | Web UI port |
 | `--no-browser` | off | Don't open a browser window on startup |
-| `--orchestra-preset` | — | Orchestra preset JSON to read zone reset ranges from |
+| `--orchestra-preset` | — | Orchestra preset JSON to read zone instrument ids from |
 
 ### Web UI (default)
 
@@ -76,10 +76,28 @@ MIDI, so a wide window near either end of the mapping flattens against 0 or
 127 rather than running past it. The OpenCV window has the same control as a
 **Range window st** trackbar.
 
+Beside each bar sit that instrument's **lowest and highest note**, as MIDI
+numbers. They are the range the instrument plays, and editing one re-maps
+that instrument's whole span across the frame straight away. They bound what
+*sounds*, not the midpoint the hand maps to: at the bottom of an
+instrument's span the window's low end sits on the low note, at the top its
+high end sits on the high note, so nothing is ever sent outside the two
+numbers you typed. A range narrower than the window can't do that, and
+collapses to its midpoint.
+
+Each box commits when you leave it or press Enter, not on every keystroke,
+and the server writes back what it accepted: 0–127, and a high at least a
+semitone above the low (a high below the low is raised, not swapped). Editing
+the range of a zone with no hand in it re-sends that zone's reset right away,
+so the receiver matches the bar. The values are hard-coded starting points
+(`_DEFAULT_RANGES` in `classes/app.py`) and a restart puts them back — they
+are not read from or written to an orchestra preset. The OpenCV window has no
+equivalent.
+
 | Bar | Meaning |
 |---|---|
 | Solid | A hand is in that zone right now, driving the range |
-| Thin dim line | No hand: the instrument is parked at the preset default it was reset to |
+| Thin dim line | No hand: the instrument is parked on its own range, which is what its reset sent |
 | Row dimmed, name struck through | Not in the active list — piano-only excludes it, so it can't sound |
 
 The piano draws two bars when two hands are on it, one when a single hand is
@@ -180,15 +198,17 @@ hand in that spot would send: the same zone mapping, the same program ids,
 the same throttles, resets and edge-triggered instrument lists. Drag a circle
 into the red region and it drops out of play, as a real hand below the
 boundary does; drag both out and the zones reset and playback pauses on the
-usual absence timer.
+usual absence timer. Both circles start down in the red region, so opening
+the tab sends nothing until you drag one up into play.
 
 Opening the tab turns **orchestra mode** on — the brass and strings zones
 only exist there — and **piano-only** on as the default. Both stay live
 controls in the tab's left column. Like the manual tab, tracking stops and
 the camera is released while it is open.
 
-The range bars move here from the gesture tab, since they report the zones
-this tab is driving, and the OSC log comes too. The gesture readout hides
+The range bars move here from the gesture tab — note boxes and window slider
+with them, so the ranges are editable from either tab — since they report the
+zones this tab is driving, and the OSC log comes too. The gesture readout hides
 itself: `gestures_used` is false in this view, the same mechanism the `range`
 and `pedal-only` presets use.
 
@@ -276,7 +296,8 @@ the active region into three instrument zones:
 Above the piano split there's no left/right boundary: **the left hand plays
 brass and the right hand plays strings**, wherever each one is. The hands can
 cross over without swapping instruments, and either can reach the full pitch
-range.
+range from either side — though which `x` plays which pitch differs between
+the two (see below).
 
 This uses MediaPipe's handedness classification. Its raw label is the
 opposite of the hand you're actually using here — it assumes a mirrored
@@ -314,8 +335,23 @@ Hand position is the **centroid of the five finger-tip landmarks** (4, 8, 12,
 pitch mapping, and for whether it's inside the active area at all — but no
 longer for brass vs strings.
 
-`x` maps across the whole frame, so brass and strings each reach the whole
-pitch range rather than half of it.
+Each zone maps `x` over its own slice of the frame, set in `_REGION_SPAN`:
+
+| Zone | Range spans | Left edge | Right edge |
+|---|---|---|---|
+| Piano | the whole width | low note | high note |
+| Brass | the **left 75%** | low note | past the high note |
+| Strings | the **right 75%** | below the low note | high note |
+
+So each instrument's range sits under the side its hand naturally plays from,
+and the two only overlap across the middle. Past its own 75% a zone keeps the
+same semitones-per-pixel slope instead of dead-ending, so the leftover quarter
+carries on past the end of the range — brass reaches above its high note on
+the right of the frame, strings below its low note on the left, and both hands
+still reach everything from wherever they are. Valid MIDI is the only hard
+stop. With the default ranges and a 16-semitone window, brass runs 36–92
+across the left three quarters and on up to ~105 at the right edge; strings
+runs 33–94 across the right three quarters and down to ~18 at the left.
 
 ### Forced instruments
 
@@ -369,15 +405,17 @@ so sends nothing on that address until piano-only first narrows the set.
 
 ### Zone resets
 
-When a zone's last hand leaves it, that zone is reset once to its instrument's
-default range, so an instrument doesn't stay parked where a hand left it. The
+When a zone's last hand leaves it, that zone is reset once to its
+instrument's full range — the two note boxes — so an instrument doesn't stay
+parked where a hand left it. The
 reset is edge-triggered — it fires on the transition to empty, not on every
 empty frame — and it clears that zone's send throttle so returning a hand to
 the same spot re-sends immediately.
 
 Each zone maps to a zero-based slot in an orchestra preset's
-`outputInstruments` list, and both its default range and the instrument id it
-sends come from that entry:
+`outputInstruments` list, which is where the instrument id it sends comes
+from. The range does not: it starts at a hard-coded default and is edited
+from the note boxes in the UI.
 
 | Zone | Preset slot | Sent as | Default range |
 |---|---|---|---|
@@ -385,15 +423,17 @@ sends come from that entry:
 | Strings | `outputInstruments[1]` — `id: 48` (string ensemble) | `48` | 33–94 |
 | Brass | `outputInstruments[2]` — `id: 61` (brass section) | `61` | 36–92 |
 
-(The ids and ranges shown are from the preset this was built against; the app
-reads whatever your preset has, and falls back to these when an entry has no
-usable `id`.) The piano's live updates use the four-argument form with no
-instrument argument, so its id only ever appears in a reset — and there the
-four-argument form is used too, so it never goes out at all.
+(The ids shown are from the preset this was built against; the app reads
+whatever your preset has, and falls back to these when an entry has no usable
+`id`. The ranges are `_DEFAULT_RANGES` in `classes/app.py` and are the same
+whatever preset you point it at.) The piano's live updates use the
+four-argument form with no instrument argument, so its id only ever appears
+in a reset — and there the four-argument form is used too, so it never goes
+out at all.
 
 Point the app at a preset with `--orchestra-preset path/to/orchestra.json`;
 without it, the app looks for `orchestra.json` beside itself and otherwise
-falls back to built-in values. The zone→preset-slot mapping lives in
+falls back to built-in ids. The zone→preset-slot mapping lives in
 `_REGION_INSTRUMENT` in `classes/app.py` — one dict to change if a zone should
 drive a different preset instrument.
 

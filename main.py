@@ -27,10 +27,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-browser", action="store_true",
                         help="do not open a browser window on startup")
     parser.add_argument("--orchestra-preset", default=None,
-                        help="orchestra preset JSON to read instrument reset "
-                             "ranges from (its outputInstruments low/high); "
-                             "defaults to orchestra.json beside the app, then "
-                             "to built-in values")
+                        help="orchestra preset JSON to read instrument ids "
+                             "from (its outputInstruments ids); defaults to "
+                             "orchestra.json beside the app, then to built-in "
+                             "values. Playing ranges are not read from it — "
+                             "those are set in the UI")
     args = parser.parse_args()
 
     app = OSCGestureApp(ip=args.host, port=args.port,

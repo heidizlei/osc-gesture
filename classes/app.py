@@ -43,14 +43,14 @@ _REGION_INSTRUMENT = {
     'brass':   2,
 }
 
-# Fallback instruments, used when no orchestra preset file is found. Mirrors
-# the "outputInstruments" defaults of the preset this was built against; the
-# ids are General MIDI programs (1 grand piano, 48 string ensemble, 61 brass
-# section), which is what fixes the order above.
+# Fallback instrument ids, used when no orchestra preset file is found.
+# Mirrors the "outputInstruments" defaults of the preset this was built
+# against; the ids are General MIDI programs (1 grand piano, 48 string
+# ensemble, 61 brass section), which is what fixes the order above.
 _DEFAULT_INSTRUMENTS = [
-    {'id': 1,  'low': 26, 'high': 89},   # piano
-    {'id': 48, 'low': 33, 'high': 94},   # strings
-    {'id': 61, 'low': 36, 'high': 92},   # brass
+    {'id': 1},    # piano
+    {'id': 48},   # strings
+    {'id': 61},   # brass
 ]
 
 _ORCHESTRA_PRESET = "orchestra.json"
@@ -72,13 +72,36 @@ _MAX_RANGE_WINDOW = 36
 # the mapping would otherwise run past them.
 _MIDI_LOW, _MIDI_HIGH = 0, 127
 
+# Playing range per region, as (low, high) MIDI notes. These are hard-coded
+# rather than read from a preset: they're where the UI's note boxes start,
+# and where a restart puts them back.
+_DEFAULT_RANGES = {
+    'piano':   (26, 89),
+    'strings': (33, 94),
+    'brass':   (36, 92),
+}
 
-def _load_instrument_defaults(preset_path=None):
-    """Map instrument index -> (midi_id, low, high) from an orchestra preset.
+# Where each region's range sits across the frame, as (start, span) fractions
+# of the width. The piano takes the lot. Brass fills the left three quarters
+# and strings the right three quarters, so the low end of each is where that
+# instrument's hand naturally sits and the two only overlap in the middle.
+# Past its own span a region keeps the same semitones-per-pixel slope, so the
+# leftover quarter carries on past the end of the range instead of piling up
+# against it -- MIDI is the only hard stop.
+_REGION_SPAN = {
+    'piano':   (0.0,  1.0),
+    'brass':   (0.0,  0.75),
+    'strings': (0.25, 0.75),
+}
+
+
+def _load_instrument_ids(preset_path=None):
+    """Map instrument index -> MIDI program id from an orchestra preset.
 
     Reads "outputInstruments" out of a preset JSON file so a region's MIDI
-    program and reset range match whatever the receiving app is configured
-    for. Falls back to _DEFAULT_INSTRUMENTS when there's no readable preset.
+    program matches whatever the receiving app is configured for. Falls back
+    to _DEFAULT_INSTRUMENTS when there's no readable preset. Playing ranges
+    are not read from here -- those are _DEFAULT_RANGES, edited from the UI.
     """
     instruments = _DEFAULT_INSTRUMENTS
     path = preset_path or _resource_path(_ORCHESTRA_PRESET)
@@ -99,18 +122,12 @@ def _load_instrument_defaults(preset_path=None):
     entries = {}
     for index, inst in enumerate(instruments):
         try:
-            low, high = int(inst['low']), int(inst['high'])
-        except (KeyError, TypeError, ValueError):
-            continue
-        try:
-            midi_id = int(inst['id'])
+            entries[index] = int(inst['id'])
         except (KeyError, TypeError, ValueError):
             # No usable id in the preset: fall back to the built-in program
             # for this slot so the wire value is still a MIDI instrument.
-            if index >= len(_DEFAULT_INSTRUMENTS):
-                continue
-            midi_id = _DEFAULT_INSTRUMENTS[index]['id']
-        entries[index] = (midi_id, low, high)
+            if index < len(_DEFAULT_INSTRUMENTS):
+                entries[index] = _DEFAULT_INSTRUMENTS[index]['id']
     return entries
 
 _MODE_COLORS = {
@@ -251,8 +268,11 @@ class OSCGestureApp:
 
         self.draw_landmarks = False
 
-        self.min_val = 10
-        self.max_val = 117
+        # Playing range per region, [low, high] MIDI notes. The web UI's note
+        # boxes edit these; they bound what sounds, not the mapped midpoint,
+        # so the output window is held inside them (see _centre_bounds).
+        self.instr_ranges = {region: list(bounds)
+                             for region, bounds in _DEFAULT_RANGES.items()}
         self.left_val = 63
         self.right_val = 63
 
@@ -293,10 +313,10 @@ class OSCGestureApp:
         # Piano-only: the piano is forced on whatever the hands are doing, and
         # a hand in brass or strings adds its instrument alongside it, instead
         # of the forced list being exactly the occupied zones.
-        self.piano_only = False
+        self.piano_only = True
         self._instr_state = {name: {'last_val': None, 'last_time': 0.0}
                              for name in ('brass', 'strings')}
-        self._instr_defaults = _load_instrument_defaults(orchestra_preset)
+        self._instr_ids = _load_instrument_ids(orchestra_preset)
         self.active_regions = []
         # Per-region "a hand was here last frame", so a reset fires on the
         # transition to empty rather than on every empty frame.
@@ -340,8 +360,9 @@ class OSCGestureApp:
 
         # Mock hand positions, normalised to the frame exactly as a detected
         # hand's finger-tip centroid is, so they run through the same zone
-        # mapping. Both start in the piano band.
-        self.mock_hands = {'Left': (0.30, 0.55), 'Right': (0.70, 0.55)}
+        # mapping. Both start low, inside the excluded region, so opening the
+        # tab drives nothing until a circle is dragged up into play.
+        self.mock_hands = {'Left': (0.30, 0.88), 'Right': (0.70, 0.88)}
 
         self.fps = 0.0
         self._last_frame_time = None
@@ -405,6 +426,23 @@ class OSCGestureApp:
         lo, hi = self.interval
         return (max(_MIDI_LOW, val + lo), min(_MIDI_HIGH, val + hi))
 
+    def _centre_bounds(self, region):
+        """(low, high) the mapped pitch may take for one region.
+
+        The note boxes bound what sounds rather than the midpoint, so the
+        window is held inside them: at the bottom of the region's span the
+        window's low end sits on the low note, at the top its high end sits
+        on the high note. A range narrower than the window can't do that and
+        collapses to its midpoint.
+        """
+        low, high = self.instr_ranges[region]
+        lo_off, hi_off = self.interval
+        c_low, c_high = low - lo_off, high - hi_off
+        if c_low > c_high:
+            mid = (low + high) // 2
+            return (mid, mid)
+        return (c_low, c_high)
+
     @property
     def range_window(self):
         """Width of the output window in semitones."""
@@ -443,8 +481,9 @@ class OSCGestureApp:
         Above the piano divider the zone follows which hand it is — left
         brass, right strings — not which side of the frame it's on, so the
         hands can cross without swapping instruments and either one can
-        reach the whole pitch range. A hand MediaPipe couldn't label falls
-        back to the frame halves.
+        reach the whole pitch range. Which x plays which pitch does differ
+        between them; see map_hand_x_to_val. A hand MediaPipe couldn't
+        label falls back to the frame halves.
         """
         if not self.orchestra_mode:
             return 'piano'
@@ -482,6 +521,32 @@ class OSCGestureApp:
         # Changes the forced list without any zone changing under a hand.
         self.send_instrument_state()
         print("Piano-only:", on)
+
+    def _set_instrument_range(self, region, low, high):
+        """Set one region's playing range, in MIDI notes.
+
+        The two need a semitone between them and have to stay inside MIDI; a
+        high below the low is raised rather than swapped, so a half-typed
+        number can't silently invert the range. A region with no hand in it
+        is parked on its range, so the receiver hears about the new one at
+        once; a live one gets it on its hand's next move.
+        """
+        if region not in self.instr_ranges:
+            raise ValueError(f"unknown instrument: {region!r}")
+        try:
+            low, high = int(low), int(high)
+        except (TypeError, ValueError):
+            raise ValueError(f"bad range for {region}: {low!r}, {high!r}")
+        low  = int(np.clip(low, _MIDI_LOW, _MIDI_HIGH - 1))
+        high = int(np.clip(high, low + 1, _MIDI_HIGH))
+        if [low, high] == self.instr_ranges[region]:
+            return
+        self.instr_ranges[region] = [low, high]
+        # Every live range was mapped through the old one.
+        self._reset_range_throttle()
+        print(f"Range {region}: {low}-{high}")
+        if not self._engaged[region]:
+            self.send_region_reset(region)
 
     def _reset_range_throttle(self):
         """Forget the last sent values so a layout change sends promptly."""
@@ -742,10 +807,7 @@ class OSCGestureApp:
         at a different preset changes the ids it sends.
         """
         index = _REGION_INSTRUMENT[region]
-        entry = self._instr_defaults.get(index)
-        if entry is not None:
-            return entry[0]
-        return _DEFAULT_INSTRUMENTS[index]['id']
+        return self._instr_ids.get(index, _DEFAULT_INSTRUMENTS[index]['id'])
 
     def send_instrument_range(self, instr, lo, hi):
         """Orchestra-mode range for one instrument: id, lo, hi, -1, -1."""
@@ -754,17 +816,15 @@ class OSCGestureApp:
         self._send_range([self._instrument_id(instr), lo, hi, -1, -1], instr)
 
     def send_region_reset(self, region):
-        """Reset one region's instrument to its preset default range.
+        """Reset one region's instrument to its configured playing range.
 
         The piano keeps the plain four-argument form; the other regions carry
         their instrument argument, matching how their live updates are sent.
         """
         if self.mode == 'pause':
             return
-        default = self._instr_defaults.get(_REGION_INSTRUMENT[region])
-        if default is None:
-            return
-        midi_id, lo, hi = default
+        midi_id = self._instrument_id(region)
+        lo, hi = self.instr_ranges[region]
         args = ([lo, hi, -1, -1] if region == 'piano'
                 else [midi_id, lo, hi, -1, -1])
         self._send_range(args, f"{region} reset")
@@ -836,11 +896,20 @@ class OSCGestureApp:
     # Hand position mapping
     # ----------------------------
 
-    def map_hand_x_to_val(self, x_norm):
+    def map_hand_x_to_val(self, x_norm, region='piano'):
+        """Hand x -> mapped pitch, over one region's slice of the frame.
+
+        Across its own span the hand covers the region's whole range; outside
+        it the same slope carries on, so a hand in the leftover quarter plays
+        past the end of the range rather than stalling at it.
+        """
         if x_norm is None:
             return None
         x_norm = max(0.0, min(1.0, x_norm))
-        return int(self.min_val + x_norm * (self.max_val - self.min_val))
+        c_low, c_high = self._centre_bounds(region)
+        start, span = _REGION_SPAN[region]
+        val = c_low + (x_norm - start) / span * (c_high - c_low)
+        return int(round(max(_MIDI_LOW, min(_MIDI_HIGH, val))))
 
 
     # ----------------------------
@@ -1007,13 +1076,15 @@ class OSCGestureApp:
     def _update_instrument(self, instr, positions):
         """Send one instrument's range from the hand playing it.
 
-        x maps across the whole frame, so either instrument reaches the whole
-        pitch range wherever its hand is. Two hands only land here together
-        when MediaPipe labelled them the same, and then collapse to their
-        mean x.
+        x maps over the instrument's own slice of the frame — the left three
+        quarters for brass, the right three for strings — and carries on at
+        the same slope through the quarter left over, so either hand still
+        reaches everything from wherever it is. Two hands only land here
+        together when MediaPipe labelled them the same, and then collapse to
+        their mean x.
         """
         x = float(np.mean([p[0] for p in positions]))
-        val = self.map_hand_x_to_val(x)
+        val = self.map_hand_x_to_val(x, instr)
 
         st = self._instr_state[instr]
         now = time.time()
@@ -1029,13 +1100,13 @@ class OSCGestureApp:
     def _update_piano(self, positions):
         # Single hand -> first channel only; second slot is sent as -1 -1
         if len(positions) == 1:
-            self.left_val = self.map_hand_x_to_val(positions[0][0])
+            self.left_val = self.map_hand_x_to_val(positions[0][0], 'piano')
             self.right_val = None
 
         # Two hands -> left/right
         elif len(positions) >= 2:
-            self.left_val = self.map_hand_x_to_val(positions[0][0])
-            self.right_val = self.map_hand_x_to_val(positions[1][0])
+            self.left_val = self.map_hand_x_to_val(positions[0][0], 'piano')
+            self.right_val = self.map_hand_x_to_val(positions[1][0], 'piano')
 
         # Throttle OSC sends; only fire when change exceeds threshold
         now = time.time()
@@ -1082,17 +1153,37 @@ class OSCGestureApp:
         with self._frame_lock:
             return self._latest_frame, self._frame_seq
 
+    def _displayed_regions(self):
+        """Regions the web UI has a row for. Only the piano exists outside
+        orchestra mode, so only it is reported there."""
+        return _RANGE_BAR_ORDER if self.orchestra_mode else ('piano',)
+
+    def _pitch_bounds(self):
+        """Lowest and highest note any displayed region can reach.
+
+        Rounded out to whole octaves: the bars' axis is drawn in them, and
+        pinning it to the exact extremes would redraw every row each time a
+        note box changed by a semitone.
+        """
+        lo, hi = _MIDI_HIGH, _MIDI_LOW
+        for region in self._displayed_regions():
+            reach = [self._window_around(self.map_hand_x_to_val(x, region))
+                     for x in (0.0, 1.0)]
+            lo = min(lo, self.instr_ranges[region][0], *(r[0] for r in reach))
+            hi = max(hi, self.instr_ranges[region][1], *(r[1] for r in reach))
+        return [max(_MIDI_LOW, lo // 12 * 12),
+                min(_MIDI_HIGH, -(-hi // 12) * 12)]
+
     def _range_bars(self):
         """Per-instrument pitch spans for the web UI's range display.
 
         A zone holding a hand reports where that hand has it; an empty one
-        reports the preset default it was reset to, so an idle instrument
-        still shows where it's parked. Only the piano exists outside
-        orchestra mode, so only it is reported there.
+        reports its full playing range, which is what its reset sent, so an
+        idle instrument still shows where it's parked. Each row also carries
+        that range, since the UI's note boxes edit it.
         """
-        regions = _RANGE_BAR_ORDER if self.orchestra_mode else ('piano',)
         bars = []
-        for region in regions:
+        for region in self._displayed_regions():
             midi_id = self._instrument_id(region)
             live    = self._engaged[region]
             spans   = []
@@ -1104,14 +1195,17 @@ class OSCGestureApp:
                 val = self._instr_state[region]['last_val']
                 if val is not None:
                     spans = [list(self._window_around(val))]
+            low, high = self.instr_ranges[region]
             if not spans:
-                # Never sounded, or reset on the way out: show the default.
-                default = self._instr_defaults.get(_REGION_INSTRUMENT[region])
+                # Never sounded, or reset on the way out: it's parked on its
+                # own range, which is what a reset sent.
                 live = False
-                spans = [] if default is None else [[default[1], default[2]]]
+                spans = [[low, high]]
             bars.append({
                 'instr':  region,
                 'id':     midi_id,
+                'low':    low,
+                'high':   high,
                 'spans':  spans,
                 'live':   live,
                 'active': midi_id in self._last_active,
@@ -1293,8 +1387,8 @@ class OSCGestureApp:
             'interval':       list(self.interval),
             'range_window':   self.range_window,
             'range_window_max': _MAX_RANGE_WINDOW,
-            'pitch_bounds':   [self._window_around(self.min_val)[0],
-                               self._window_around(self.max_val)[1]],
+            'pitch_bounds':   self._pitch_bounds(),
+            'range_limits':   [_MIDI_LOW, _MIDI_HIGH],
             'ranges':         self._range_bars(),
             'hands':          hands,
             'osc':            osc_entries,
@@ -1338,6 +1432,16 @@ class OSCGestureApp:
             self._set_active_area_ratio(float(payload['active_area']))
         if 'range_window' in payload:
             self._set_range_window(payload['range_window'])
+        if 'instr_range' in payload:
+            spec = payload['instr_range']
+            if not isinstance(spec, dict):
+                raise ValueError("instr_range must be an object")
+            for region, bounds in spec.items():
+                try:
+                    low, high = bounds
+                except (TypeError, ValueError):
+                    raise ValueError(f"bad range for {region}: {bounds!r}")
+                self._set_instrument_range(region, low, high)
         if 'draw_landmarks' in payload:
             self.draw_landmarks = bool(payload['draw_landmarks'])
             print("Draw landmarks:", self.draw_landmarks)
