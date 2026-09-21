@@ -12,7 +12,7 @@
     color: #e8e8e8;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 15px;
-    padding: 24px 20px 40px;
+    padding: 24px 20px 190px;
     max-width: 780px;
     margin: 0 auto;
   }
@@ -125,6 +125,22 @@
   #statusBar.ok  { color: #4dbb88; }
   #statusBar.err { color: #f66; }
 
+  /* ---- Received OSC log (sits above the sent-controls status bar) ---- */
+  #receivedLog {
+    position: fixed;
+    bottom: 37px; left: 0; right: 0;
+    max-height: 130px;
+    overflow-y: auto;
+    background: #1a1a1a;
+    border-top: 1px solid #333;
+    padding: 6px 18px;
+    font-size: 0.82rem;
+    font-family: monospace;
+    color: #6ab3f7;
+  }
+  #receivedLog .row { white-space: nowrap; padding: 1px 0; }
+  #receivedLog .row.noteoff { color: #4dbb88; }
+
   /* ---- Tempo section layout ---- */
   .tempo-label {
     font-size: 0.8rem;
@@ -199,6 +215,23 @@
   </div>
 </section>
 
+<!-- ================================================================ -->
+<!-- Capture Controls                                                  -->
+<!-- ================================================================ -->
+<section style="background: #2a3a2a;">
+  <h2>Capture Playback</h2>
+  <p style="font-size: 0.9rem; color: #aaa; margin-bottom: 10px;">
+    Records both MIDI output and OSC controls with synchronized timing.
+    Saves to ~/haires/workspace/control_runs/E1_live/
+  </p>
+  <div class="btn-row">
+    <button style="background: #2a5a2a;" onclick="startCapture()">⏺ Start Capture</button>
+    <button style="background: #8a3a2a;" onclick="stopCapture()">⏹ Stop & Save</button>
+  </div>
+  <div id="captureStatus" style="font-size: 0.85rem; color: #8a8; margin-top: 8px;"></div>
+</section>
+
+<div id="receivedLog"></div>
 <div id="statusBar">Ready</div>
 
 <script>
@@ -372,19 +405,22 @@ function sendPitchRange() {
   }, 500);
 }
 
-function _flushPitchRange() {
+function getCurrentRangeArgs() {
   const sem = getSemitones();
   if (linkedMode) {
     const lo = clamp(handles[0] - sem, 0, 127);
     const hi = clamp(handles[0] + sem, 0, 127);
-    sendOSC('/setOutputRange', [lo, hi, lo, hi]);
-  } else {
-    const lo1 = clamp(handles[0] - sem, 0, 127);
-    const hi1 = clamp(handles[0] + sem, 0, 127);
-    const lo2 = clamp(handles[1] - sem, 0, 127);
-    const hi2 = clamp(handles[1] + sem, 0, 127);
-    sendOSC('/setOutputRange', [lo1, hi1, lo2, hi2]);
+    return [lo, hi, lo, hi];
   }
+  const lo1 = clamp(handles[0] - sem, 0, 127);
+  const hi1 = clamp(handles[0] + sem, 0, 127);
+  const lo2 = clamp(handles[1] - sem, 0, 127);
+  const hi2 = clamp(handles[1] + sem, 0, 127);
+  return [lo1, hi1, lo2, hi2];
+}
+
+function _flushPitchRange() {
+  sendOSC('/setOutputRange', getCurrentRangeArgs());
 }
 
 // ---- Sizing: keep canvas pixel dims in sync with CSS layout ----
@@ -507,6 +543,49 @@ async function sendTempo(ratio) {
 }
 
 // ------------------------------------------------------------------ //
+// Capture controls                                                    //
+// ------------------------------------------------------------------ //
+const captureStatus = document.getElementById('captureStatus');
+
+async function startCapture() {
+  try {
+    const res = await fetch('/capture/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address: '/setOutputRange', args: getCurrentRangeArgs() }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      captureStatus.textContent = `⏹ Capturing to ${data.output_dir}`;
+      captureStatus.style.color = '#8f8';
+    } else {
+      captureStatus.textContent = `Error: ${res.status}`;
+      captureStatus.style.color = '#f88';
+    }
+  } catch (e) {
+    captureStatus.textContent = `Error: ${e.message}`;
+    captureStatus.style.color = '#f88';
+  }
+}
+
+async function stopCapture() {
+  try {
+    const res = await fetch('/capture/stop', { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      captureStatus.textContent = `✓ Saved to ${data.output_dir}`;
+      captureStatus.style.color = '#8f8';
+    } else {
+      captureStatus.textContent = `Error: ${res.status}`;
+      captureStatus.style.color = '#f88';
+    }
+  } catch (e) {
+    captureStatus.textContent = `Error: ${e.message}`;
+    captureStatus.style.color = '#f88';
+  }
+}
+
+// ------------------------------------------------------------------ //
 // POST to Python bridge                                               //
 // ------------------------------------------------------------------ //
 const statusBar = document.getElementById('statusBar');
@@ -546,6 +625,35 @@ async function sendOSC(address, args) {
     setStatus(`Network error: ${e.message}`, 'err');
   }
 }
+
+// ------------------------------------------------------------------ //
+// Received OSC log — polls /received for /noteon, /noteoff, etc.     //
+// from JordanAI and prints them above the sent-controls status bar.  //
+// ------------------------------------------------------------------ //
+const receivedLog = document.getElementById('receivedLog');
+let lastSeq = 0;
+
+async function pollReceived() {
+  try {
+    const res = await fetch(`/received?since=${lastSeq}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    for (const e of data.entries) {
+      lastSeq = Math.max(lastSeq, e.seq);
+      const argsStr = e.args.map(a => (typeof a === 'number' && !Number.isInteger(a))
+        ? a.toFixed(2) : String(a)).join(' ');
+      const row = document.createElement('div');
+      row.className = 'row' + (e.address === '/noteoff' ? ' noteoff' : '');
+      row.textContent = `${e.address}  ${argsStr}`;
+      receivedLog.appendChild(row);
+      while (receivedLog.children.length > 50) receivedLog.removeChild(receivedLog.firstChild);
+    }
+    if (data.entries.length) receivedLog.scrollTop = receivedLog.scrollHeight;
+  } catch (e) {
+    // ignore network errors during polling
+  }
+}
+setInterval(pollReceived, 300);
 </script>
 </body>
 </html>
