@@ -136,6 +136,14 @@ def _jsonable(value):
     return value
 
 
+# The tabs the web UI offers; only 'gesture' wants the camera.
+_VIEWS = ('gesture', 'manual', 'mock')
+
+# Mock stage tick. Fast enough that dragging feels live, slow enough that the
+# loop is not spinning: the send throttles downstream are the real rate limit.
+_MOCK_TICK_S = 1 / 30
+
+
 class _OSCLog:
     """Forwarding wrapper that records every OSC message sent.
 
@@ -320,13 +328,20 @@ class OSCGestureApp:
         self._camera_lock  = threading.Lock()
         self._camera_cache = None
 
-        # Manual mode: the manual tab drives OSC by hand, so tracking stops
-        # and the camera is let go. Requested from the server thread, applied
-        # by the gesture loop -- same handoff as a camera switch, and for the
-        # same reason: the loop owns the capture device.
-        self._manual_lock    = threading.Lock()
-        self._manual_pending = None
-        self.manual_mode     = False
+        # Which tab is driving. 'gesture' is the camera; 'manual' sends OSC
+        # by hand; 'mock' feeds the zone logic hand positions dragged in the
+        # browser. Only 'gesture' wants the camera, so the other two let it
+        # go. Requested from the server thread, applied by the gesture loop --
+        # same handoff as a camera switch, and for the same reason: the loop
+        # owns the capture device.
+        self._view_lock    = threading.Lock()
+        self._view_pending = None
+        self.view          = 'gesture'
+
+        # Mock hand positions, normalised to the frame exactly as a detected
+        # hand's finger-tip centroid is, so they run through the same zone
+        # mapping. Both start in the piano band.
+        self.mock_hands = {'Left': (0.30, 0.55), 'Right': (0.70, 0.55)}
 
         self.fps = 0.0
         self._last_frame_time = None
@@ -416,7 +431,7 @@ class OSCGestureApp:
         detector still runs but nothing downstream reads it — and showing its
         output would suggest otherwise.
         """
-        return self.mode == 'tempo'
+        return self.mode == 'tempo' and self.view != 'mock'
 
     def _orchestra_split_y(self):
         """Absolute frame y of the piano / brass-strings divider."""
@@ -864,11 +879,15 @@ class OSCGestureApp:
         Returns (frame, results, active_hand_indices); frame is None when the
         camera gave us nothing this round.
         """
-        self._apply_pending_manual()
-        if self.manual_mode:
+        self._apply_pending_view()
+        if self.view != 'gesture':
             # Nothing to capture and nothing to detect. Without the pause the
             # loop would spin a core doing exactly that.
-            time.sleep(0.1)
+            if self.view == 'mock':
+                self._step_mock()
+                time.sleep(_MOCK_TICK_S)
+            else:
+                time.sleep(0.1)
             return None, None, []
 
         frame, results = self.hand_tracker.get_frame_and_landmarks(
@@ -1100,42 +1119,54 @@ class OSCGestureApp:
             })
         return bars
 
-    def request_manual_mode(self, manual):
-        """Ask to enter/leave manual mode; the gesture loop performs the swap.
+    def request_view(self, name):
+        """Ask to switch tabs; the gesture loop performs the swap.
 
         Releasing the capture from the server thread would pull it out from
         under a read in flight, so this only records the request.
         """
-        manual = bool(manual)
-        with self._manual_lock:
-            self._manual_pending = manual
-        return manual
+        if name not in _VIEWS:
+            raise ValueError(f"unknown view: {name!r}")
+        with self._view_lock:
+            self._view_pending = name
+        return name
 
-    def manual_requested(self):
-        """Manual mode as last *asked for*, which is what the UI is told.
+    def view_requested(self):
+        """The view last *asked for*, which is what the UI is told.
 
         The gesture loop applies a request a beat after it is made, so
-        reporting the applied flag would answer a click with the state it
+        reporting the applied value would answer a click with the state it
         just replaced -- the page would see its own request contradicted and
-        flip back. Intent is the honest answer here; the camera catches up.
+        switch back. Intent is the honest answer here; the camera catches up.
         """
-        with self._manual_lock:
-            return self.manual_mode if self._manual_pending is None \
-                else self._manual_pending
+        with self._view_lock:
+            return self.view if self._view_pending is None else self._view_pending
 
-    def _apply_pending_manual(self):
-        """Enter or leave manual mode. Called from the gesture loop only."""
-        with self._manual_lock:
-            wanted = self._manual_pending
-            self._manual_pending = None
-        if wanted is None or wanted == self.manual_mode:
+    def _apply_pending_view(self):
+        """Switch tabs. Called from the gesture loop only."""
+        with self._view_lock:
+            wanted = self._view_pending
+            self._view_pending = None
+        if wanted is None or wanted == self.view:
             return
-        self.manual_mode = wanted
-        if wanted:
+        previous, self.view = self.view, wanted
+
+        if previous == 'gesture':
             self.hand_tracker.release_camera()
             self.hand_present = False
             self.gesture_detector.reset()
             self._publish_frame(None, None, [])
+        if previous == 'mock':
+            # Mock hands vanish with the tab, so let the zones they held
+            # reset rather than leaving instruments parked where they were.
+            self.active_regions = []
+            self._update_region_engagement()
+
+        if wanted == 'gesture':
+            self.hand_tracker.resume_camera()
+            # last_hand_present stays as it was, so the usual absence timer
+            # takes over from here and re-pauses if no hand comes back.
+        elif wanted == 'manual':
             # Hand-absence may well have left the receiver paused, and in
             # manual mode nothing is ever going to resume it -- every manual
             # send would land on a paused receiver and look broken. Presence
@@ -1143,12 +1174,56 @@ class OSCGestureApp:
             self.send_manual_pause(0)
             self.last_hand_present = True
             self.hand_absent_since = None
-            print("Manual mode: on (camera released)")
-        else:
-            self.hand_tracker.resume_camera()
-            # last_hand_present stays True, so the usual absence timer takes
-            # over from here and re-pauses if no hand comes back.
-            print("Manual mode: off")
+        elif wanted == 'mock':
+            # The mock stage exists to exercise the three zones, and they
+            # only exist in orchestra mode. Piano-only is the asked-for
+            # default; both stay live controls once the tab is open.
+            self._set_orchestra_mode(True)
+            self._set_piano_only(True)
+        print(f"View: {wanted}" +
+              ("" if wanted == 'gesture' else " (camera released)"))
+
+    def set_mock_hands(self, hands):
+        """Place the mock hands, as {'Left': [x, y], 'Right': [x, y]}.
+
+        Coordinates are normalised to the frame the browser draws, which is
+        the flipped one the preview shows, so they mean the same thing here
+        as a detected hand's centroid does.
+        """
+        if not isinstance(hands, dict):
+            raise ValueError("mock_hands must be an object")
+        placed = dict(self.mock_hands)
+        for label, xy in hands.items():
+            if label not in ('Left', 'Right'):
+                raise ValueError(f"unknown hand: {label!r}")
+            try:
+                x, y = (float(v) for v in xy)
+            except (TypeError, ValueError):
+                raise ValueError(f"bad position for {label}: {xy!r}")
+            placed[label] = (min(max(x, 0.0), 1.0), min(max(y, 0.0), 1.0))
+        with self._view_lock:
+            self.mock_hands = placed
+        return placed
+
+    def _step_mock(self):
+        """One cycle of the mock stage: synthetic hands, real zone logic.
+
+        Everything downstream of detection is the code the camera path uses,
+        so what the mock sends is what a hand in that spot would send. A hand
+        dragged into the excluded region drops out exactly as a real one does.
+        """
+        with self._view_lock:
+            hands = self.mock_hands
+        positions = [(x, y, label) for label, (x, y) in
+                     (('Left', hands['Left']), ('Right', hands['Right']))
+                     if y <= self.active_area_ratio]
+
+        self.hand_present = bool(positions)
+        self.active_regions = sorted({self._hand_region(*p) for p in positions})
+        self._update_hand_presence()
+        self._update_region_engagement()
+        if positions:
+            self._update_output_range(positions)
 
     def send_manual_osc(self, address, args):
         """Send one OSC message on behalf of the manual tab.
@@ -1226,7 +1301,9 @@ class OSCGestureApp:
             'osc_seq':        osc_seq,
             'camera':           self.hand_tracker.camera_index,
             'camera_error':     self.hand_tracker.camera_error,
-            'manual':           self.manual_requested(),
+            'view':             self.view_requested(),
+            'mock_hands':       {k: [round(v[0], 4), round(v[1], 4)]
+                                 for k, v in self.mock_hands.items()},
             'orchestra':        self.orchestra_mode,
             'piano_only':       self.piano_only,
             'orchestra_split':  round(self._orchestra_split_y(), 4),
@@ -1275,8 +1352,10 @@ class OSCGestureApp:
             if index < 0:
                 raise ValueError(f"bad camera index: {index}")
             self.hand_tracker.request_camera(index)
-        if 'manual' in payload:
-            self.request_manual_mode(payload['manual'])
+        if 'view' in payload:
+            self.request_view(payload['view'])
+        if 'mock_hands' in payload:
+            self.set_mock_hands(payload['mock_hands'])
         if 'orchestra' in payload:
             self._set_orchestra_mode(bool(payload['orchestra']))
         if 'piano_only' in payload:

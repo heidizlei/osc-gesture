@@ -108,14 +108,14 @@
     pointer-events: none;
   }
   /* The excluded region: drag it (or its handle) to move the boundary. */
-  #excl {
+  #excl, #mExcl {
     position: absolute;
     left: 0; right: 0; bottom: 0;
     background: rgba(255, 100, 100, 0.25);
     border-top: 2px solid #f44;
     cursor: ns-resize;
   }
-  #excl::after {
+  #excl::after, #mExcl::after {
     content: "";
     position: absolute;
     top: -14px; left: 50%;
@@ -124,7 +124,7 @@
     border-radius: 3px;
     background: #f44;
   }
-  #exclLabel {
+  #exclLabel, #mExclLabel {
     position: absolute;
     left: 10px; top: -22px;
     font-size: 11px;
@@ -133,7 +133,8 @@
     white-space: nowrap;
     pointer-events: none;
   }
-  #stage.drag-excl #excl { background: rgba(255, 100, 100, 0.4); }
+  #stage.drag-excl #excl,
+  #mockStage.drag-excl #mExcl { background: rgba(255, 100, 100, 0.4); }
   .hint { font-size: 0.75rem; color: #6e6e6e; margin-top: 10px; }
 
   /* ---- camera picker, floating over the preview ---- */
@@ -171,17 +172,18 @@
   #camErr:empty { display: none; }
 
   /* ---- orchestra-mode dividers ---- */
-  #regions { position: absolute; inset: 0; pointer-events: none; }
-  #regions[hidden] { display: none; }
-  #splitBar { position: absolute; background: #fb3; left: 0; right: 0; height: 2px; }
-  #splitBar::after {
+  #regions, #mRegions { position: absolute; inset: 0; pointer-events: none; }
+  #regions[hidden], #mRegions[hidden] { display: none; }
+  #splitBar, #mSplitBar { position: absolute; background: #fb3; left: 0; right: 0; height: 2px; }
+  #splitBar::after, #mSplitBar::after {
     content: "";
     position: absolute; top: -2px; left: 50%;
     transform: translateX(-50%);
     width: 54px; height: 6px;
     border-radius: 3px; background: #fb3;
   }
-  #stage.drag-split #splitBar {
+  #stage.drag-split #splitBar,
+  #mockStage.drag-split #mSplitBar {
     background: #fd6;
     box-shadow: 0 0 8px rgba(255, 187, 51, 0.9);
   }
@@ -522,6 +524,66 @@
   .tempo-label { font-size: 0.8rem; color: var(--dim); margin-bottom: 6px; }
   .tempo-group { margin-bottom: 10px; }
   .tempo-group:last-child { margin-bottom: 0; }
+
+  /* An explicit `display` on a view container beats the UA rule behind the
+     hidden attribute, so each one has to opt back out by hand. */
+  #manualView[hidden], #mockView[hidden] { display: none; }
+
+  /* ---- mock stage: the camera preview's stand-in ---- */
+  #mockView {
+    display: grid;
+    grid-template-columns: 160px minmax(0, 1fr) 300px;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  @media (max-width: 900px) {
+    #mockView { grid-template-columns: 1fr; }
+  }
+  #mockView > section {
+    margin-bottom: 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  #mockStage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4 / 3;        /* a camera frame, without the camera */
+    background: #111;
+    border-radius: 8px;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+  }
+  .mock-hand {
+    position: absolute;
+    width: 46px; height: 46px;
+    margin: -23px 0 0 -23px;    /* the stored point is the circle's centre */
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #111;
+    cursor: grab;
+    touch-action: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+  }
+  .mock-hand:active { cursor: grabbing; }
+  #mockHandL { background: #f0883e; }
+  #mockHandR { background: #6ab3f7; }
+  /* Dragged into the excluded region: still there, but out of play, which is
+     how a real hand below the boundary is treated. */
+  .mock-hand.out { opacity: 0.4; box-shadow: none; }
+  #mockLogSlot {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+  }
 </style>
 </head>
 <body>
@@ -531,6 +593,7 @@
   <div class="tabs">
     <button type="button" id="tabGesture" aria-pressed="true">Gesture</button>
     <button type="button" id="tabManual"  aria-pressed="false">Manual</button>
+    <button type="button" id="tabMock"    aria-pressed="false">Orchestra</button>
   </div>
   <span class="stat" id="fps">— fps</span>
   <span class="dot" id="handDot" title="hand detected in active area"></span>
@@ -684,6 +747,43 @@
       released while this tab is open, so nothing overwrites what you send
       here. The log below is the same one the gesture tab shows.</p>
     <div id="manualLogSlot"></div>
+  </section>
+</div>
+
+<div id="mockView" hidden>
+  <section>
+    <h2>Zones</h2>
+    <div class="mode-toggle" style="margin-top:0; padding-top:0; border-top:none">
+      <label><input type="checkbox" id="mockOrchestra"> Orchestra</label>
+      <label id="mockPianoOnlyRow">
+        <input type="checkbox" id="mockPianoOnly"> Piano-only
+      </label>
+    </div>
+    <p class="hint">Both are set on opening this tab — the zones only exist in
+      orchestra mode — and stay yours to change from here.</p>
+  </section>
+
+  <section>
+    <div id="mockStage">
+      <div id="mExcl"><span id="mExclLabel"></span></div>
+      <div id="mRegions" hidden>
+        <div id="mSplitBar"></div>
+        <div class="rlabel" id="mLabBrass">brass · left hand</div>
+        <div class="rlabel" id="mLabStrings">strings · right hand</div>
+        <div class="rlabel" id="mLabPiano">piano</div>
+      </div>
+      <div class="mock-hand" id="mockHandL" data-hand="Left">L</div>
+      <div class="mock-hand" id="mockHandR" data-hand="Right">R</div>
+    </div>
+    <p class="hint">Drag the circles to stand in for hands, and the amber and
+      red bars to move the same boundaries the camera tab uses. Everything
+      below detection is the real thing, so these send what a hand in that
+      spot would send. Drag a circle into the red region to take it out of
+      play, as a real hand below the boundary is.</p>
+  </section>
+
+  <section>
+    <div id="mockLogSlot"></div>
   </section>
 </div>
 
@@ -889,34 +989,49 @@ function geom() {
   };
 }
 
+// The camera preview and the mock stage draw the same boundaries over the
+// same normalised geometry, so one set of handlers serves both. Each entry
+// names that stage's copy of the overlay elements.
+const STAGE_VIEWS = [
+  { el: "stage", excl: "excl", exclLabel: "exclLabel", regions: "regions",
+    split: "splitBar", brass: "labBrass", strings: "labStrings", piano: "labPiano" },
+  { el: "mockStage", excl: "mExcl", exclLabel: "mExclLabel", regions: "mRegions",
+    split: "mSplitBar", brass: "mLabBrass", strings: "mLabStrings", piano: "mLabPiano" },
+];
+
 function renderGeometry() {
   const g = geom();
   const exclPct = g.excl * 100;
-  $("excl").style.top = exclPct + "%";
-  $("exclLabel").textContent = `Active ${Math.round(exclPct)}%`;
-
-  $("regions").hidden = !g.orchestra;
-  if (!g.orchestra) return;
-
   const splitPct = g.split * 100;
-  $("splitBar").style.top = splitPct + "%";
-
-  // brass / strings sit just above the split bar, piano just below it. They
-  // sit at the frame edges as a reminder of which hand plays which, not as
-  // a boundary: the hands can cross without swapping instruments.
-  $("labBrass").style.cssText   = `left:8px; top:calc(${splitPct}% - 19px)`;
-  $("labStrings").style.cssText = `right:8px; top:calc(${splitPct}% - 19px)`;
-  $("labPiano").style.cssText   = `left:8px; top:calc(${splitPct}% + 6px)`;
-
   const live = new Set(state?.active_regions || []);
-  for (const [id, name] of [["labBrass", "brass"], ["labStrings", "strings"],
-                            ["labPiano", "piano"]]) {
-    $(id).classList.toggle("live", live.has(name));
+
+  for (const v of STAGE_VIEWS) {
+    $(v.excl).style.top = exclPct + "%";
+    $(v.exclLabel).textContent = `Active ${Math.round(exclPct)}%`;
+
+    $(v.regions).hidden = !g.orchestra;
+    if (!g.orchestra) continue;
+
+    $(v.split).style.top = splitPct + "%";
+
+    // brass / strings sit just above the split bar, piano just below it. They
+    // sit at the frame edges as a reminder of which hand plays which, not as
+    // a boundary: the hands can cross without swapping instruments.
+    $(v.brass).style.cssText   = `left:8px; top:calc(${splitPct}% - 19px)`;
+    $(v.strings).style.cssText = `right:8px; top:calc(${splitPct}% - 19px)`;
+    $(v.piano).style.cssText   = `left:8px; top:calc(${splitPct}% + 6px)`;
+
+    for (const [key, name] of [["brass", "brass"], ["strings", "strings"],
+                               ["piano", "piano"]]) {
+      $(v[key]).classList.toggle("live", live.has(name));
+    }
   }
+
+  renderMockHands();
 }
 
-function hitTest(e) {
-  const r = stage.getBoundingClientRect();
+function hitTest(e, stageEl) {
+  const r = stageEl.getBoundingClientRect();
   if (!r.width || !r.height) return null;
   const y = e.clientY - r.top;
   const g = geom();
@@ -937,8 +1052,8 @@ function hitTest(e) {
   return cands[0].id;
 }
 
-function valueFromPointer(id, e) {
-  const r = stage.getBoundingClientRect();
+function valueFromPointer(id, e, stageEl) {
+  const r = stageEl.getBoundingClientRect();
   const y = (e.clientY - r.top) / r.height;
   if (id === "excl") return clamp(y, 0.10, 0.95);
   // The server stores the split as a fraction of the active region and clamps
@@ -947,37 +1062,45 @@ function valueFromPointer(id, e) {
   return clamp(y, excl * 0.10, excl * 0.90);
 }
 
-stage.addEventListener("pointerdown", (e) => {
-  if (e.target.closest("#camPick")) return;   // the picker owns its own clicks
-  const id = hitTest(e);
-  if (!id) return;
-  drag = { id, value: valueFromPointer(id, e) };
-  stage.classList.add("drag-" + id);
-  stage.setPointerCapture(e.pointerId);
-  renderGeometry();
-  e.preventDefault();
-});
+// Anything that owns its own pointer events sits on top of a stage and must
+// not start a bar drag underneath itself.
+const OVERLAY_SELECTOR = "#camPick, .mock-hand";
 
-stage.addEventListener("pointermove", (e) => {
-  if (!drag) {
-    const id = e.target.closest("#camPick") ? null : hitTest(e);
-    stage.style.cursor = id ? "ns-resize" : "default";
-    return;
-  }
-  drag.value = valueFromPointer(drag.id, e);
-  renderGeometry();
-  e.preventDefault();
-});
+for (const v of STAGE_VIEWS) {
+  const stageEl = $(v.el);
 
-function endDrag() {
-  if (!drag) return;
-  const { id, value } = drag;
-  drag = null;
-  stage.classList.remove("drag-excl", "drag-split");
-  send({ [HANDLE_KEY[id]]: value });
+  stageEl.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(OVERLAY_SELECTOR)) return;
+    const id = hitTest(e, stageEl);
+    if (!id) return;
+    drag = { id, value: valueFromPointer(id, e, stageEl) };
+    stageEl.classList.add("drag-" + id);
+    stageEl.setPointerCapture(e.pointerId);
+    renderGeometry();
+    e.preventDefault();
+  });
+
+  stageEl.addEventListener("pointermove", (e) => {
+    if (!drag) {
+      const id = e.target.closest(OVERLAY_SELECTOR) ? null : hitTest(e, stageEl);
+      stageEl.style.cursor = id ? "ns-resize" : "default";
+      return;
+    }
+    drag.value = valueFromPointer(drag.id, e, stageEl);
+    renderGeometry();
+    e.preventDefault();
+  });
+
+  const endDrag = () => {
+    if (!drag) return;
+    const { id, value } = drag;
+    drag = null;
+    stageEl.classList.remove("drag-excl", "drag-split");
+    send({ [HANDLE_KEY[id]]: value });
+  };
+  stageEl.addEventListener("pointerup", endDrag);
+  stageEl.addEventListener("pointercancel", endDrag);
 }
-stage.addEventListener("pointerup", endDrag);
-stage.addEventListener("pointercancel", endDrag);
 
 // ---------------------------------------------------------- camera picker
 
@@ -1290,13 +1413,12 @@ function apply(s, opts = {}) {
     $("sent").style.color = MODE_COLORS[s.last_sent.split(" ")[0]] || "#888";
   }
 
-  // A reload while the server is in manual mode would otherwise show the
+  // A reload while the server is on another tab would otherwise show the
   // gesture tab over a stopped camera. The server is the authority.
-  if (s.manual !== undefined && s.manual !== (activeTab === "manual")) {
-    setTab(s.manual ? "manual" : "gesture");
-  }
+  if (s.view && s.view !== activeTab) setTab(s.view);
 
-  $("fps").textContent = s.manual ? "camera off" : s.fps.toFixed(1) + " fps";
+  $("fps").textContent =
+    s.view === "gesture" ? s.fps.toFixed(1) + " fps" : "camera off";
   $("handDot").classList.toggle("on", s.hand_present);
 
   const [lo, hi] = s.interval;
@@ -1320,6 +1442,10 @@ function apply(s, opts = {}) {
   if ($("orchestra") !== document.activeElement) $("orchestra").checked = s.orchestra;
   if ($("pianoOnly") !== document.activeElement) $("pianoOnly").checked = s.piano_only;
   $("pianoOnly").disabled = !s.orchestra;
+  if ($("mockOrchestra") !== document.activeElement) $("mockOrchestra").checked = s.orchestra;
+  if ($("mockPianoOnly") !== document.activeElement) $("mockPianoOnly").checked = s.piano_only;
+  $("mockPianoOnly").disabled = !s.orchestra;
+  $("mockPianoOnlyRow").classList.toggle("off", !s.orchestra);
   syncCamera(s);
   $("pianoOnlyRow").classList.toggle("off", !s.orchestra);
 
@@ -1364,37 +1490,141 @@ $("cam").addEventListener("error", () => {
 // rather than keep two of them in sync, the one element is moved between the
 // two tabs, so manual sends and gesture sends read as one stream.
 
+const VIEW_UI = {
+  gesture: { tab: "tabGesture", panel: "gestureView", slot: "logColumn" },
+  manual:  { tab: "tabManual",  panel: "manualView", slot: "manualLogSlot" },
+  mock:    { tab: "tabMock",    panel: "mockView",   slot: "mockLogSlot" },
+};
+
 let activeTab = "gesture";
 
 function setTab(name) {
-  if (name === activeTab) return;
+  if (name === activeTab || !VIEW_UI[name]) return;
   activeTab = name;
-  const manual = name === "manual";
 
-  $("tabGesture").setAttribute("aria-pressed", String(!manual));
-  $("tabManual").setAttribute("aria-pressed", String(manual));
-  $("gestureView").hidden = manual;
-  $("manualView").hidden = !manual;
+  for (const [v, ui] of Object.entries(VIEW_UI)) {
+    $(ui.tab).setAttribute("aria-pressed", String(v === name));
+    $(ui.panel).hidden = v !== name;
+  }
 
-  const slot = manual ? $("manualLogSlot") : $("logColumn");
+  // One log element, moved to whichever tab is showing, so there is one
+  // stream and one scroll position rather than copies to keep in step. The
+  // range bars travel to the mock tab, where they report zones it is
+  // actually driving; in the manual tab they would be describing zones
+  // nothing has touched since the camera stopped.
+  const slot = $(VIEW_UI[name].slot);
+  const col = $("logColumn");
+  if (name === "mock") slot.appendChild($("gestureBlock"));
+  else col.insertBefore($("gestureBlock"), col.firstChild);
   slot.appendChild($("logHead"));
   slot.appendChild(logEl);
 
   const cam = $("cam");
-  if (manual) {
+  if (name === "gesture") {
+    cam.src = "/stream?t=" + Date.now();
+    syncLogHeight();
+  } else {
     // Drop the MJPEG connection; the server has nothing to send it now.
     cam.removeAttribute("src");
     logEl.style.maxHeight = "";     // no stage to size against: let CSS cap it
-    resizePitchCanvas();
-  } else {
-    cam.src = "/stream?t=" + Date.now();
-    syncLogHeight();
   }
-  send({ manual });
+  if (name === "manual") resizePitchCanvas();
+  if (name === "mock") renderGeometry();
+  send({ view: name });
 }
 
-$("tabGesture").addEventListener("click", () => setTab("gesture"));
-$("tabManual").addEventListener("click", () => setTab("manual"));
+for (const [v, ui] of Object.entries(VIEW_UI)) {
+  $(ui.tab).addEventListener("click", () => setTab(v));
+}
+
+// ---------------------------------------------------------------- mock hands
+
+const MOCK_HANDS = [
+  { id: "mockHandL", label: "Left",  home: [0.30, 0.55] },
+  { id: "mockHandR", label: "Right", home: [0.70, 0.55] },
+];
+
+// Set while a circle is under the pointer. Like the bar drag, it overrides
+// the polled state so a 10 Hz response cannot fight the pointer.
+let mockDrag = null;
+
+function mockPoint(e) {
+  const r = $("mockStage").getBoundingClientRect();
+  return {
+    x: clamp((e.clientX - r.left) / r.width, 0, 1),
+    y: clamp((e.clientY - r.top) / r.height, 0, 1),
+  };
+}
+
+function renderMockHands() {
+  const exclY = geom().excl;
+  for (const { id, label, home } of MOCK_HANDS) {
+    const [x, y] = (mockDrag && mockDrag.label === label)
+      ? [mockDrag.x, mockDrag.y]
+      : (state?.mock_hands?.[label] || home);
+    const el = $(id);
+    el.style.left = x * 100 + "%";
+    el.style.top = y * 100 + "%";
+    // Below the boundary it is out of play, same as a real hand there.
+    el.classList.toggle("out", y > exclY);
+  }
+}
+
+// Pointer moves arrive far faster than the loop can use them, so sends are
+// throttled with the last position always going out.
+let mockTimer = null, mockPendingSend = false;
+
+function flushMockHands() {
+  if (!mockDrag) return;
+  send({ mock_hands: { [mockDrag.label]: [mockDrag.x, mockDrag.y] } });
+}
+
+function sendMockHands(now = false) {
+  if (now) {
+    clearTimeout(mockTimer);
+    mockTimer = null;
+    mockPendingSend = false;
+    flushMockHands();
+    return;
+  }
+  if (mockTimer !== null) { mockPendingSend = true; return; }
+  flushMockHands();
+  mockTimer = setTimeout(() => {
+    mockTimer = null;
+    if (mockPendingSend) { mockPendingSend = false; flushMockHands(); }
+  }, 60);
+}
+
+for (const { id, label } of MOCK_HANDS) {
+  const el = $(id);
+  el.addEventListener("pointerdown", (e) => {
+    mockDrag = { label, ...mockPoint(e) };
+    el.setPointerCapture(e.pointerId);
+    renderMockHands();
+    e.preventDefault();
+    e.stopPropagation();          // not a bar drag on the stage underneath
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (!mockDrag || mockDrag.label !== label) return;
+    Object.assign(mockDrag, mockPoint(e));
+    renderMockHands();
+    sendMockHands();
+    e.preventDefault();
+  });
+  const endMockDrag = () => {
+    if (!mockDrag || mockDrag.label !== label) return;
+    sendMockHands(true);          // the resting position always goes out
+    mockDrag = null;
+    renderMockHands();
+  };
+  el.addEventListener("pointerup", endMockDrag);
+  el.addEventListener("pointercancel", endMockDrag);
+}
+
+$("mockOrchestra").addEventListener("change", (e) =>
+  send({ orchestra: e.target.checked }));
+$("mockPianoOnly").addEventListener("change", (e) =>
+  send({ piano_only: e.target.checked }));
 
 // ---------------------------------------------------------------- manual OSC
 

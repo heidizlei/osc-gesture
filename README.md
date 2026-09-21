@@ -31,8 +31,9 @@ python main.py --host <ip> --port <port>
 ### Web UI (default)
 
 On startup the app serves `ui.html` at `http://127.0.0.1:8765` and opens it in
-your browser. Two tabs in the header pick what the page drives: **Gesture**
-(below) and **Manual**, which is the hand-driven OSC controller.
+your browser. Three tabs in the header pick what the page drives: **Gesture**
+(below), **Manual**, the hand-driven OSC controller, and **Orchestra**, a
+mock camera stage for exercising the zones without a camera.
 
 The gesture tab's main row is three columns:
 
@@ -163,6 +164,44 @@ one scroll position.
 
 Nothing is sent on opening the tab or loading the page — the slider states
 its position only once you move it.
+
+### Orchestra tab
+
+A stand-in for the camera: a frame-shaped rectangle holding two circles for
+the left and right hand, with the same amber piano split and red exclusion
+boundary the preview has, dividing it into the same three bands. Drag the
+circles to place the hands and the bars to move the boundaries.
+
+There is no detection here, and that is the whole point — but everything
+*downstream* of detection is the code the camera path runs. The circles feed
+`_hand_region`, `_update_region_engagement` and `_update_output_range`
+exactly as a detected finger-tip centroid does, so what this sends is what a
+hand in that spot would send: the same zone mapping, the same program ids,
+the same throttles, resets and edge-triggered instrument lists. Drag a circle
+into the red region and it drops out of play, as a real hand below the
+boundary does; drag both out and the zones reset and playback pauses on the
+usual absence timer.
+
+Opening the tab turns **orchestra mode** on — the brass and strings zones
+only exist there — and **piano-only** on as the default. Both stay live
+controls in the tab's left column. Like the manual tab, tracking stops and
+the camera is released while it is open.
+
+The range bars move here from the gesture tab, since they report the zones
+this tab is driving, and the OSC log comes too. The gesture readout hides
+itself: `gestures_used` is false in this view, the same mechanism the `range`
+and `pedal-only` presets use.
+
+| Drag | Effect |
+|---|---|
+| A circle | Places that hand; `L` is the left hand (brass above the split), `R` the right (strings) |
+| Amber bar | Piano split — `orchestra_split`, same as the preview |
+| Red region | Exclusion boundary — `active_area`, same as the preview |
+
+Hand positions are normalised to the rectangle exactly as they are to the
+camera frame, and the preview shows the flipped frame, so a circle on the
+left of the mock stage means the same thing as a hand on the left of the
+preview.
 
 ### Why the web UI is the default
 
