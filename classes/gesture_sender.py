@@ -47,8 +47,9 @@ class GestureSender:
     BAROQUE_MAX_RUNS   = 2   # L2 = Moderate (caps VeryFast/Fast)
     BAROQUE_MAX_CHORDS = 1   # L1 = Moderate (caps Fast)
 
-    def __init__(self, baroque=False):
+    def __init__(self, baroque=False, enable_tempo=True):
         self.baroque = baroque
+        self.enable_tempo = enable_tempo   # gate for /adjustTempo (faster/slower) messages
         # Runs/chords accumulator
         self._cons_mode       = None
         self._cons_count      = 0
@@ -70,6 +71,11 @@ class GestureSender:
 
     def tick(self, mode, intensity, osc_client):
         now = time.time()
+
+        # Tempo gestures (faster/slower) are ignored entirely when disabled,
+        # leaving runs/chords accumulation undisturbed.
+        if mode in ('faster', 'slower') and not self.enable_tempo:
+            return
 
         # ----------------------------------------------------------------
         # Slower — one-shot, send immediately

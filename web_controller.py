@@ -2,13 +2,16 @@
 """
 web_controller.py — Browser-based OSC controller.
 
-Serves controller.html and accepts POST requests from the browser,
-forwarding them as OSC UDP packets via pythonosc.
+Serves the page in the HTML constant below and accepts POST requests from
+the browser, forwarding them as OSC UDP packets via pythonosc. The
+controller.html written beside this script is a copy for easy editing --
+it is rewritten from HTML on every run, and never read back.
 
 Usage:
-    conda run -n jambot python /Users/hlei/haires/osc-gesture/web_controller.py
-    conda run -n jambot python /Users/hlei/haires/osc-gesture/web_controller.py --host 100.101.30.29 --port 9001
-    conda run -n jambot python /Users/hlei/haires/osc-gesture/web_controller.py --http-port 8080
+    python web_controller.py
+    python web_controller.py --host 192.168.1.20 --port 9001
+    python web_controller.py --http-port 8080   # main.py's web UI also uses 8765
+    python web_controller.py --capture-port 9002  # OSC port to capture MIDI on
 """
 
 import argparse
@@ -1095,7 +1098,7 @@ def setup_osc_listener(listen_port: int):
 
 def main():
     parser = argparse.ArgumentParser(description='OSC web controller bridge')
-    parser.add_argument('--host',          default='100.101.30.29', help='OSC target host')
+    parser.add_argument('--host',          default='127.0.0.1',     help='OSC target host')
     parser.add_argument('--port',          default=9001, type=int,  help='OSC target port (JordanAI)')
     parser.add_argument('--http-port',     default=8765, type=int,  help='HTTP server port')
     parser.add_argument('--http-host',     default='0.0.0.0',       help='HTTP bind address')

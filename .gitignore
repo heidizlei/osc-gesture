@@ -28,8 +28,10 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
+.pyinstaller/
 *.manifest
 *.spec
+!osc-gesture.spec
 
 # Virtual environments
 venv/
@@ -57,3 +59,9 @@ pip-delete-this-directory.txt
 # Local development
 .env
 .env.local
+
+# Per-machine Makefile settings
+local.mk
+
+# Local gesture recordings (kept on disk, not tracked)
+recordings/
