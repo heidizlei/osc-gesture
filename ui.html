@@ -617,6 +617,14 @@
 </header>
 
 <div id="err"></div>
+<section style="margin:12px 20px;padding:12px;border:1px solid #46505d;border-radius:8px">
+  <label><input type="checkbox" id="orchestraPedalMode"> Pedal controls piano</label>
+  <label style="margin-left:20px">Tracking grace (ms)
+    <input id="handGrace" type="number" min="0" max="1000" step="10" value="150" style="width:70px"></label>
+  <p id="orchestraPedalStatus" role="status">Receiver not confirmed</p>
+  <small>In orchestra pedal mode: pedal down disables piano; hands enable brass/strings.
+    Changes wait for Input Clear Delay; sounding notes finish.</small>
+</section>
 
 <div id="gestureView">
 <div class="main">
@@ -769,7 +777,17 @@
 
 <div id="mockView" hidden>
   <section>
-    <h2>Zones</h2>
+    <h2>Piano pedal</h2>
+    <label><input type="checkbox" id="simulatePedal"> Simulated pedal (otherwise physical)</label>
+    <div class="btn-row" style="margin-top:12px">
+      <button type="button" id="holdPedal">Hold pedal — disable piano</button>
+      <button type="button" id="pressPedal">Press</button>
+      <button type="button" id="releasePedal">Release</button>
+    </div>
+    <p id="simPedalState">Physical pedal selected</p>
+    <p class="hint">Press leaves the simulated pedal down while you drag hands.
+      Release allows piano again. Leaving this tab restores physical control.</p>
+    <h2 style="margin-top:20px">Zones</h2>
     <div class="mode-toggle" style="margin-top:0; padding-top:0; border-top:none">
       <label><input type="checkbox" id="mockOrchestra"> Orchestra</label>
       <label id="mockPianoOnlyRow">
@@ -1511,6 +1529,7 @@ function apply(s, opts = {}) {
   $("mockPianoOnly").disabled = !s.orchestra;
   $("mockPianoOnlyRow").classList.toggle("off", !s.orchestra);
   syncCamera(s);
+  renderOrchestraPedal(s);
   $("pianoOnlyRow").classList.toggle("off", !s.orchestra);
 
   renderRanges(s);
@@ -1599,6 +1618,62 @@ function setTab(name) {
 
 for (const [v, ui] of Object.entries(VIEW_UI)) {
   $(ui.tab).addEventListener("click", () => setTab(v));
+}
+
+// Shared receiver-backed orchestra controls.
+$("orchestraPedalMode").addEventListener("change", e => send({orchestra_pedal_mode:e.target.checked}));
+$("handGrace").addEventListener("change", e => send({hand_grace_ms:Number(e.target.value)}));
+$("simulatePedal").addEventListener("change", e => send({simulated_pedal:e.target.checked}));
+const pedal = down => send({pedal_down:down});
+$("pressPedal").addEventListener("click", () => pedal(true));
+$("releasePedal").addEventListener("click", () => pedal(false));
+let holdingPedal = false;
+const releaseHeldPedal = () => { if (holdingPedal) { holdingPedal = false; pedal(false); } };
+$("holdPedal").addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  holdingPedal = true; e.currentTarget.setPointerCapture(e.pointerId); pedal(true); e.preventDefault();
+});
+for (const event of ["pointerup", "pointercancel", "lostpointercapture"])
+  $("holdPedal").addEventListener(event, releaseHeldPedal);
+$("holdPedal").addEventListener("keydown", e => {
+  if ((e.code === "Space" || e.code === "Enter") && !e.repeat) {
+    e.preventDefault(); holdingPedal = true; pedal(true);
+  }
+});
+$("holdPedal").addEventListener("keyup", e => {
+  if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); releaseHeldPedal(); }
+});
+window.addEventListener("blur", releaseHeldPedal);
+document.addEventListener("visibilitychange", () => { if (document.hidden) releaseHeldPedal(); });
+
+function renderOrchestraPedal(s) {
+  const p = s.orchestra_pedal || {}, r = p.receiver || {};
+  $("orchestraPedalMode").checked = !!p.requested;
+  if (document.activeElement !== $("handGrace")) $("handGrace").value = s.hand_grace_ms ?? 150;
+  $("simulatePedal").checked = !!p.simulated;
+  $("simulatePedal").disabled = !p.requested || !p.confirmed;
+  for (const id of ["holdPedal", "pressPedal", "releasePedal"])
+    $(id).disabled = !p.simulated || !p.requested || !p.confirmed;
+  $("simPedalState").textContent = p.simulated ? `Simulated pedal: ${p.down ? "pressed" : "released"}` : "Physical pedal selected";
+  const names = new Map((s.ranges || []).map(v => [v.id ?? v.midi_id, v.instr ?? v.region ?? v.name]));
+  const list = ids => (ids || []).map(id => names.get(id) || `instrument ${id}`).join(" + ") || "No instruments enabled";
+  let label = !p.confirmed ? "Receiver unavailable or unsupported — state unconfirmed"
+    : !r.mode && !r.effectiveMode ? "Legacy mode"
+    : `${r.simulated ? "Simulated" : "Physical"} pedal ${r.pedalDown ? "pressed" : "released"}${r.pedalKnown ? "" : " (Start On setting; not observed)"} · ${list(r.active)}`;
+  if (p.confirmed && r.boundary > r.time)
+    label += ` · Pending: ${list(r.target)} in ${((r.boundary-r.time)/100).toFixed(2)} s`;
+  if (p.confirmed) label += !r.running ? " · Transport stopped" : r.paused ? " · Globally paused" : "";
+  if (p.requested && p.confirmed && r.contextInterval <= 0)
+    label += " · Context Interval disabled; enable it in JordanAI for continuous listening";
+  if (p.requested && p.confirmed && r.configured) {
+    const missing = (s.ranges || []).filter(v => !r.configured.includes(v.id));
+    if (missing.length) label += ` · Preset is missing: ${missing.map(v => v.instr).join(", ")}`;
+  }
+  $("orchestraPedalStatus").textContent = label;
+  for (const id of ["pianoOnly", "mockPianoOnly"]) {
+    $(id).disabled = !s.orchestra || !!p.requested;
+    $(id).title = p.requested ? "Piano permission comes from the pedal" : "";
+  }
 }
 
 // ---------------------------------------------------------------- mock hands

@@ -7,6 +7,7 @@ import collections
 import cv2
 import numpy as np
 from pythonosc import udp_client
+from .orchestra_control import OrchestraControl, HandGrace
 from .tracker import HandTracker, HandLandmarkDrawer, list_cameras
 from .gesture_detector import GestureDetector
 from .gesture_sender import GestureSender
@@ -258,6 +259,10 @@ class OSCGestureApp:
         # valid even if a caller swaps out osc_client.
         self.osc_log    = _OSCLog(udp_client.SimpleUDPClient(ip, port))
         self.osc_client = self.osc_log
+        self.orchestra_control = OrchestraControl(self.osc_client.send_message, ip)
+        self.hand_grace = HandGrace()
+        self.hand_grace_ms = 150
+        self._pedal_mode_seen = False
 
         # Hand tracking
         self.hand_tracker = HandTracker(
@@ -506,6 +511,8 @@ class OSCGestureApp:
         if on == self.orchestra_mode:
             return
         self.orchestra_mode = on
+        if not on and self.orchestra_control.enabled:
+            self.orchestra_control.set_mode(False)
         # The regions changed under the hands, so forget the throttle state.
         self._reset_range_throttle()
         # Turning off clears the forced list; turning on states it, since the
@@ -787,7 +794,10 @@ class OSCGestureApp:
                 arg3, arg4 = self._window_around(right_val)
 
         try:
-            self.osc_client.send_message("/setOutputRange", [arg1, arg2, arg3, arg4])
+            args = [arg1, arg2, arg3, arg4]
+            if self.orchestra_mode or self.orchestra_control.enabled:
+                args.insert(0, self._instrument_id('piano'))
+            self.osc_client.send_message("/setOutputRange", args)
             print(f"OSC → /setOutputRange {arg1} {arg2} {arg3} {arg4}")
         except Exception as e:
             print("OSC send error:", e)
@@ -825,7 +835,7 @@ class OSCGestureApp:
             return
         midi_id = self._instrument_id(region)
         lo, hi = self.instr_ranges[region]
-        args = ([lo, hi, -1, -1] if region == 'piano'
+        args = ([lo, hi, -1, -1] if region == 'piano' and not self.orchestra_mode and not self.orchestra_control.enabled
                 else [midi_id, lo, hi, -1, -1])
         self._send_range(args, f"{region} reset")
 
@@ -867,6 +877,9 @@ class OSCGestureApp:
         """
         if self.mode == 'pause':
             return
+        if self.orchestra_control.enabled:
+            self._send_orchestra_occupancy()
+            return
         active = self._active_instrument_ids()
         if active != self._last_active:
             self._last_active = active
@@ -885,9 +898,14 @@ class OSCGestureApp:
             print("OSC send error:", e)
 
     def send_manual_pause(self, pause_flag):
+        if self.orchestra_control.enabled:
+            return
         try:
-            self.osc_client.send_message("/setManualPause", pause_flag)
-            print(f"OSC → /setManualPause {pause_flag}")
+            # Tagged companion lets an updated receiver distinguish camera pause
+            # ownership. Older receivers continue using /setManualPause.
+            address = '/setCameraPause' if self.orchestra_control.status else '/setManualPause'
+            self.osc_client.send_message(address, pause_flag)
+            print(f"OSC → {address} {pause_flag}")
         except Exception as e:
             print("Pause OSC error:", e)
 
@@ -948,6 +966,19 @@ class OSCGestureApp:
         Returns (frame, results, active_hand_indices); frame is None when the
         camera gave us nothing this round.
         """
+        enabled = self.orchestra_control.enabled
+        if enabled != self._pedal_mode_seen:
+            self._pedal_mode_seen = enabled
+            self.hand_grace.seen.clear()
+            if enabled:
+                self.orchestra_mode = True
+                self._send_orchestra_occupancy()
+            else:
+                self._last_active = self._last_forced = [-999]
+                self.send_instrument_state()
+                self.send_manual_pause(0)
+                self.last_hand_present = True
+                self.hand_absent_since = None
         self._apply_pending_view()
         if self.view != 'gesture':
             # Nothing to capture and nothing to detect. Without the pause the
@@ -962,6 +993,11 @@ class OSCGestureApp:
         frame, results = self.hand_tracker.get_frame_and_landmarks(
             active_area_ratio=self.active_area_ratio)
         if frame is None:
+            if self.orchestra_control.enabled:
+                self.active_regions = self.hand_grace.update([], [], self._hand_region,
+                    time.monotonic(), self.hand_grace_ms / 1000)
+                self._update_region_engagement()
+                self._send_orchestra_occupancy()
             return None, None, []
 
         self._frame_height = frame.shape[0]
@@ -991,14 +1027,25 @@ class OSCGestureApp:
         positions = [self._hand_position(results.hand_landmarks[i])
                      + (self._handedness(results, i),)
                      for i in active_hand_indices]
-        self.active_regions = sorted({self._hand_region(*p) for p in positions})
+        if self.orchestra_control.enabled:
+            observed = [self._handedness(results, i) for i in range(len(results.hand_landmarks or []))]
+            self.active_regions = self.hand_grace.update(positions, observed, self._hand_region,
+                time.monotonic(), self.hand_grace_ms / 1000)
+        else:
+            self.active_regions = sorted({self._hand_region(*p) for p in positions})
 
         self._update_hand_presence()
         self._update_region_engagement()
+        self._send_orchestra_occupancy()
         if positions:
             self._update_output_range(positions)
 
         return frame, results, active_hand_indices
+
+    def _send_orchestra_occupancy(self):
+        mask = int(self._engaged['brass']) | (int(self._engaged['strings']) << 1)
+        self.orchestra_control.set_occupancy(self._instrument_id('piano'),
+            self._instrument_id('strings'), self._instrument_id('brass'), mask)
 
     def _update_region_engagement(self):
         """Track which regions hold a hand, and react on the edges.
@@ -1208,8 +1255,8 @@ class OSCGestureApp:
                 'high':   high,
                 'spans':  spans,
                 'live':   live,
-                'active': midi_id in self._last_active,
-                'forced': midi_id in self._last_forced,
+                'active': midi_id in (self.orchestra_control.status.get('active', []) if self.orchestra_control.enabled else self._last_active),
+                'forced': midi_id in (self.orchestra_control.status.get('forced', []) if self.orchestra_control.enabled else self._last_forced),
             })
         return bars
 
@@ -1244,6 +1291,13 @@ class OSCGestureApp:
         if wanted is None or wanted == self.view:
             return
         previous, self.view = self.view, wanted
+        self.hand_grace.seen.clear()
+        if wanted != 'mock':
+            self.orchestra_control.set_source(False)
+        if self.orchestra_control.enabled:
+            self.active_regions = []
+            self._update_region_engagement()
+            self._send_orchestra_occupancy()
 
         if previous == 'gesture':
             self.hand_tracker.release_camera()
@@ -1273,7 +1327,8 @@ class OSCGestureApp:
             # only exist in orchestra mode. Piano-only is the asked-for
             # default; both stay live controls once the tab is open.
             self._set_orchestra_mode(True)
-            self._set_piano_only(True)
+            if not self.orchestra_control.enabled:
+                self._set_piano_only(True)
         print(f"View: {wanted}" +
               ("" if wanted == 'gesture' else " (camera released)"))
 
@@ -1316,6 +1371,7 @@ class OSCGestureApp:
         self.active_regions = sorted({self._hand_region(*p) for p in positions})
         self._update_hand_presence()
         self._update_region_engagement()
+        self._send_orchestra_occupancy()
         if positions:
             self._update_output_range(positions)
 
@@ -1400,6 +1456,8 @@ class OSCGestureApp:
                                  for k, v in self.mock_hands.items()},
             'orchestra':        self.orchestra_mode,
             'piano_only':       self.piano_only,
+            'orchestra_pedal':  self.orchestra_control.state(),
+            'hand_grace_ms':    self.hand_grace_ms,
             'orchestra_split':  round(self._orchestra_split_y(), 4),
             'active_regions':   list(self.active_regions),
         }
@@ -1423,6 +1481,18 @@ class OSCGestureApp:
 
         Raises ValueError on an unknown preset so the handler can answer 400.
         """
+        if 'orchestra_pedal_mode' in payload:
+            if payload['orchestra_pedal_mode']:
+                self._set_orchestra_mode(True)
+            self.orchestra_control.set_mode(bool(payload['orchestra_pedal_mode']))
+        if 'hand_grace_ms' in payload:
+            self.hand_grace_ms = max(0, min(1000, int(payload['hand_grace_ms'])))
+        if 'simulated_pedal' in payload:
+            if self.view_requested() != 'mock' and payload['simulated_pedal']:
+                raise ValueError('Pedal simulation belongs to the Orchestra tab')
+            self.orchestra_control.set_source(bool(payload['simulated_pedal']))
+        if 'pedal_down' in payload:
+            self.orchestra_control.pedal(bool(payload['pedal_down']))
         if 'preset' in payload:
             name = payload['preset']
             if name not in self._PRESETS:
@@ -1588,6 +1658,7 @@ class OSCGestureApp:
             print("\nStopping.")
         finally:
             cv2.destroyAllWindows()
+            self.orchestra_control.close()
             self.hand_tracker.close()
 
     def _run_web(self, http_host, http_port, open_browser):
@@ -1610,4 +1681,5 @@ class OSCGestureApp:
             print("\nStopping.")
         finally:
             web.stop()
+            self.orchestra_control.close()
             self.hand_tracker.close()
