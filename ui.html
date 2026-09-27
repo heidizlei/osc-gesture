@@ -618,6 +618,9 @@
 
 <div id="err"></div>
 <section style="margin:12px 20px;padding:12px;border:1px solid #46505d;border-radius:8px">
+  <button type="button" id="gestureControl" aria-pressed="true">Gesture control: On</button>
+  <span id="gestureControlStatus" role="status"></span>
+  <br>
   <label><input type="checkbox" id="orchestraPedalMode"> Pedal controls piano</label>
   <label style="margin-left:20px">Tracking grace (ms)
     <input id="handGrace" type="number" min="0" max="1000" step="10" value="150" style="width:70px"></label>
@@ -777,7 +780,7 @@
 
 <div id="mockView" hidden>
   <section>
-    <h2>Piano pedal</h2>
+    <h2>Pedal</h2>
     <label><input type="checkbox" id="simulatePedal"> Simulated pedal (otherwise physical)</label>
     <div class="btn-row" style="margin-top:12px">
       <button type="button" id="holdPedal">Hold pedal — disable piano</button>
@@ -785,7 +788,7 @@
       <button type="button" id="releasePedal">Release</button>
     </div>
     <p id="simPedalState">Physical pedal selected</p>
-    <p class="hint">Press leaves the simulated pedal down while you drag hands.
+    <p class="hint" id="simPedalHint">Press leaves the simulated pedal down while you drag hands.
       Release allows piano again. Leaving this tab restores physical control.</p>
     <h2 style="margin-top:20px">Zones</h2>
     <div class="mode-toggle" style="margin-top:0; padding-top:0; border-top:none">
@@ -1442,6 +1445,7 @@ function renderRanges(s) {
     r.row.classList.toggle("off", !e.active);
     setNoteBox(r.low, e.low);
     setNoteBox(r.high, e.high);
+    r.low.disabled = r.high.disabled = s.orchestra_pedal?.gesture_enabled === false;
 
     while (r.spans.length < e.spans.length) {
       const bar = document.createElement("div");
@@ -1507,9 +1511,9 @@ function apply(s, opts = {}) {
   const rightRange = s.right_val === null
     ? "-1 -1"
     : `${s.right_val + lo}–${s.right_val + hi}`;
-  $("rangeInfo").textContent =
-    `output range   L ${s.left_val + lo}–${s.left_val + hi}` +
-    `   R ${rightRange}`;
+  $("rangeInfo").textContent = s.orchestra_pedal?.gesture_enabled === false
+    ? "Output ranges restored from the JordanAI preset"
+    : `output range   L ${s.left_val + lo}–${s.left_val + hi}   R ${rightRange}`;
 
   if (typeof s.range_window_max === "number") {
     $("rangeWindow").max = s.range_window_max;
@@ -1621,6 +1625,8 @@ for (const [v, ui] of Object.entries(VIEW_UI)) {
 }
 
 // Shared receiver-backed orchestra controls.
+$("gestureControl").addEventListener("click", () =>
+  send({gesture_control: state?.orchestra_pedal?.gesture_enabled === false}));
 $("orchestraPedalMode").addEventListener("change", e => send({orchestra_pedal_mode:e.target.checked}));
 $("handGrace").addEventListener("change", e => send({hand_grace_ms:Number(e.target.value)}));
 $("simulatePedal").addEventListener("change", e => send({simulated_pedal:e.target.checked}));
@@ -1648,16 +1654,28 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) relea
 
 function renderOrchestraPedal(s) {
   const p = s.orchestra_pedal || {}, r = p.receiver || {};
+  const gestureOn = p.gesture_enabled !== false;
+  $("gestureControl").textContent = `Gesture control: ${gestureOn ? "On" : "Off"}`;
+  $("gestureControl").setAttribute("aria-pressed", String(gestureOn));
+  $("gestureControl").disabled = !!p.gesture_pending;
+  $("gestureControlStatus").textContent = p.gesture_pending ? "Waiting for JordanAI…"
+    : gestureOn ? "" : "Normal pedal · piano, strings and brass · preset ranges";
+  $("orchestraPedalMode").disabled = !gestureOn;
   $("orchestraPedalMode").checked = !!p.requested;
   if (document.activeElement !== $("handGrace")) $("handGrace").value = s.hand_grace_ms ?? 150;
   $("simulatePedal").checked = !!p.simulated;
-  $("simulatePedal").disabled = !p.requested || !p.confirmed;
+  $("simulatePedal").disabled = (!p.requested && gestureOn) || !p.confirmed;
+  $("holdPedal").textContent = gestureOn ? "Hold pedal — disable piano" : "Hold pedal — pause ensemble";
+  $("simPedalHint").textContent = gestureOn
+    ? "Press leaves the simulated pedal down while you drag hands. Release allows piano again. Leaving this tab restores physical control."
+    : "Press pauses the whole ensemble; release resumes it. Leaving this tab restores physical control.";
   for (const id of ["holdPedal", "pressPedal", "releasePedal"])
-    $(id).disabled = !p.simulated || !p.requested || !p.confirmed;
+    $(id).disabled = !p.simulated || (!p.requested && gestureOn) || !p.confirmed;
   $("simPedalState").textContent = p.simulated ? `Simulated pedal: ${p.down ? "pressed" : "released"}` : "Physical pedal selected";
   const names = new Map((s.ranges || []).map(v => [v.id ?? v.midi_id, v.instr ?? v.region ?? v.name]));
   const list = ids => (ids || []).map(id => names.get(id) || `instrument ${id}`).join(" + ") || "No instruments enabled";
   let label = !p.confirmed ? "Receiver unavailable or unsupported — state unconfirmed"
+    : !gestureOn ? `Normal pedal · ${list(r.active)}`
     : !r.mode && !r.effectiveMode ? "Legacy mode"
     : `${r.simulated ? "Simulated" : "Physical"} pedal ${r.pedalDown ? "pressed" : "released"}${r.pedalKnown ? "" : " (Start On setting; not observed)"} · ${list(r.active)}`;
   if (p.confirmed && r.boundary > r.time)
@@ -1671,7 +1689,7 @@ function renderOrchestraPedal(s) {
   }
   $("orchestraPedalStatus").textContent = label;
   for (const id of ["pianoOnly", "mockPianoOnly"]) {
-    $(id).disabled = !s.orchestra || !!p.requested;
+    $(id).disabled = !gestureOn || !s.orchestra || !!p.requested;
     $(id).title = p.requested ? "Piano permission comes from the pedal" : "";
   }
 }

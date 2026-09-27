@@ -18,6 +18,8 @@ class StatusSubscriptionTests(unittest.TestCase):
         control.send = Mock()
         control.lock = threading.RLock()
         control.requested = None
+        control.gesture_requested = None
+        control.gesture_preference = None
         control.status = {}
         control.received = 0
         control.last_subscription = float('-inf')
@@ -67,6 +69,48 @@ class StatusSubscriptionTests(unittest.TestCase):
                          ('/setModelConfig', ['orchestraPianoPedalMode', 1]))
         self.assertEqual(control.send.call_args_list[1].args,
                          ('/subscribeOrchestraState', ['127.0.0.1', 19001, 30]))
+
+    def test_bypass_stops_sends_immediately_and_waits_for_enable_ack(self):
+        control = self.controller()
+        control.status = {'mode': True, 'gestureControlEnabled': True}
+        control.set_gesture_control(False)
+        self.assertFalse(control.gesture_enabled)
+        self.assertFalse(control.enabled)
+        control._receive('/orchestraState', '{"mode":false,"gestureControlEnabled":false}')
+        self.assertIsNone(control.gesture_requested)
+        control.set_gesture_control(True)
+        self.assertFalse(control.gesture_enabled)
+        control._receive('/orchestraState', '{"mode":true,"gestureControlEnabled":true}')
+        self.assertTrue(control.gesture_enabled)
+        self.assertTrue(control.enabled)
+
+    def test_normal_pedal_simulation_available_while_gestures_off(self):
+        control = self.controller()
+        control.status = {'mode': False, 'gestureControlEnabled': False, 'pedalDown': False}
+        control.set_source(True)
+        self.assertFalse(control.down)
+        control.pedal(True)
+        self.assertTrue(control.down)
+        control.send.assert_any_call('/setOrchestraPianoPedal', 1)
+        with self.assertRaises(ValueError):
+            control.set_mode(True)
+
+    def test_reconnect_reasserts_user_bypass_preference(self):
+        control = self.controller()
+        control.set_gesture_control(False)
+        control._receive('/orchestraState', '{"mode":false,"gestureControlEnabled":false}')
+        control._receive('/orchestraState', '{"mode":true,"gestureControlEnabled":true}')
+        self.assertFalse(control.gesture_enabled)
+        self.assertIs(control.gesture_requested, False)
+
+    def test_enable_request_does_not_trust_an_old_on_snapshot(self):
+        control = self.controller()
+        control.status = {'mode': True, 'gestureControlEnabled': True}
+        control.set_gesture_control(False)
+        control.set_gesture_control(True)
+        self.assertFalse(control.gesture_enabled)
+        control._receive('/orchestraState', '{"mode":true,"gestureControlEnabled":true}')
+        self.assertTrue(control.gesture_enabled)
 
 
 if __name__ == '__main__':

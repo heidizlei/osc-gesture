@@ -35,6 +35,8 @@ class OrchestraControl:
         self.send = send
         self.lock = threading.RLock()
         self.requested = None
+        self.gesture_requested = None
+        self.gesture_preference = None
         self.status = {}
         self.received = 0.0
         self.last_subscription = float('-inf')
@@ -57,7 +59,21 @@ class OrchestraControl:
     @property
     def enabled(self):
         with self.lock:
+            if not self.gesture_enabled:
+                return False
             return bool(self.requested if self.requested is not None else self.status.get('mode', False))
+
+    @property
+    def gesture_enabled(self):
+        with self.lock:
+            # Stop sends immediately on disable; resume only after receiver ACK.
+            if self.gesture_requested is not None:
+                return False
+            return bool(self.status.get('gestureControlEnabled', True))
+
+    @property
+    def pedal_available(self):
+        return self.enabled or not self.gesture_enabled
 
     def _receive(self, address, payload):
         try:
@@ -69,20 +85,33 @@ class OrchestraControl:
         with self.lock:
             self.status = status
             self.received = time.monotonic()
+            if 'gestureControlEnabled' in status and self.gesture_preference is not None:
+                self.gesture_requested = (None if bool(status['gestureControlEnabled']) == self.gesture_preference
+                                          else self.gesture_preference)
             if self.requested is not None and bool(status['mode']) == self.requested:
                 self.requested = None
 
     def set_mode(self, enabled):
         with self.lock:
+            if not self.gesture_enabled:
+                raise ValueError('Enable gesture control before changing orchestra pedal mode')
             self.requested = bool(enabled)
             if not enabled:
                 self.simulated = False
             self.send('/setModelConfig', ['orchestraPianoPedalMode', int(enabled)])
             self._subscribe_status()
 
+    def set_gesture_control(self, enabled):
+        with self.lock:
+            self.gesture_preference = self.gesture_requested = bool(enabled)
+            self.requested = None
+            self.occupancy[3] = 0
+            self.send('/setGestureControl', int(enabled))
+            self._subscribe_status()
+
     def set_source(self, simulated):
         with self.lock:
-            if simulated and not self.enabled:
+            if simulated and not self.pedal_available:
                 raise ValueError('Enable Pedal controls piano first')
             if simulated and not self.simulated:
                 self.down = bool(self.status.get('pedalDown', True))
@@ -95,7 +124,7 @@ class OrchestraControl:
 
     def pedal(self, down):
         with self.lock:
-            if not self.simulated or not self.enabled:
+            if not self.simulated or not self.pedal_available:
                 raise ValueError('Select Simulated pedal first')
             self.down = bool(down)
             self.browser_seen = time.monotonic()
@@ -115,6 +144,7 @@ class OrchestraControl:
         with self.lock:
             self.browser_seen = time.monotonic()
             return dict(requested=self.enabled,
+                        gesture_enabled=self.gesture_enabled, gesture_pending=self.gesture_requested is not None,
                         confirmed=bool(self.status) and time.monotonic() - self.received < self.STATUS_STALE_SECONDS,
                         receiver=dict(self.status), simulated=self.simulated, down=self.down)
 
@@ -129,13 +159,16 @@ class OrchestraControl:
                 with self.lock:
                     if self.stop_event.is_set():
                         break
-                    if self.requested is not None:
+                    if self.gesture_requested is not None:
+                        self.send('/setGestureControl', int(self.gesture_requested))
+                    if self.requested is not None and self.gesture_enabled:
                         self.send('/setModelConfig', ['orchestraPianoPedalMode', int(self.requested)])
                     if self.enabled:
                         values = list(self.occupancy)
                         if time.monotonic() - self.occupancy_seen > 1:
                             values[3] = 0
                         self.send('/setOrchestraOccupancy', values)
+                    if self.enabled or self.simulated:
                         if self.simulated and time.monotonic() - self.browser_seen > 2:
                             self.simulated = False
                         self.send('/setOrchestraPedalSource', int(self.simulated))
