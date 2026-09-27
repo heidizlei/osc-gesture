@@ -25,12 +25,19 @@ class HandGrace:
 
 
 class OrchestraControl:
+    # Status changes arrive from JordanAI. A slow lease renewal repairs lost
+    # UDP packets/restarts; control liveness still uses the existing heartbeat.
+    STATUS_RENEW_SECONDS = 10.0
+    STATUS_STALE_SECONDS = 15.0
+    STATUS_LEASE_SECONDS = 30
+
     def __init__(self, send, host):
         self.send = send
         self.lock = threading.RLock()
         self.requested = None
         self.status = {}
         self.received = 0.0
+        self.last_subscription = float('-inf')
         self.simulated = False
         self.down = True
         self.browser_seen = 0.0
@@ -71,6 +78,7 @@ class OrchestraControl:
             if not enabled:
                 self.simulated = False
             self.send('/setModelConfig', ['orchestraPianoPedalMode', int(enabled)])
+            self._subscribe_status()
 
     def set_source(self, simulated):
         with self.lock:
@@ -83,6 +91,7 @@ class OrchestraControl:
             self.send('/setOrchestraPedalSource', int(self.simulated))
             if self.simulated:
                 self.send('/setOrchestraPianoPedal', int(self.down))
+            self._subscribe_status()
 
     def pedal(self, down):
         with self.lock:
@@ -91,6 +100,7 @@ class OrchestraControl:
             self.down = bool(down)
             self.browser_seen = time.monotonic()
             self.send('/setOrchestraPianoPedal', int(self.down))
+            self._subscribe_status()
 
     def set_occupancy(self, piano, strings, brass, mask):
         with self.lock:
@@ -104,13 +114,21 @@ class OrchestraControl:
     def state(self):
         with self.lock:
             self.browser_seen = time.monotonic()
-            return dict(requested=self.enabled, confirmed=time.monotonic() - self.received < 2,
+            return dict(requested=self.enabled,
+                        confirmed=bool(self.status) and time.monotonic() - self.received < self.STATUS_STALE_SECONDS,
                         receiver=dict(self.status), simulated=self.simulated, down=self.down)
+
+    def _subscribe_status(self):
+        self.send('/subscribeOrchestraState', [self.reply_host, self.server.server_address[1],
+                                              self.STATUS_LEASE_SECONDS])
+        self.last_subscription = time.monotonic()
 
     def _run(self):
         while not self.stop_event.wait(0.3):
             try:
                 with self.lock:
+                    if self.stop_event.is_set():
+                        break
                     if self.requested is not None:
                         self.send('/setModelConfig', ['orchestraPianoPedalMode', int(self.requested)])
                     if self.enabled:
@@ -123,13 +141,18 @@ class OrchestraControl:
                         self.send('/setOrchestraPedalSource', int(self.simulated))
                         if self.simulated:
                             self.send('/setOrchestraPianoPedal', int(self.down))
-                    self.send('/getOrchestraState', [self.reply_host, self.server.server_address[1]])
+                    if time.monotonic() - self.last_subscription >= self.STATUS_RENEW_SECONDS:
+                        self._subscribe_status()
             except OSError:
                 pass  # UI shows stale/unconfirmed receiver status until it recovers.
 
     def close(self):
         self.stop_event.set()
-        self.send('/setOrchestraPedalSource', 0)
-        self.send('/setOrchestraOccupancy', self.occupancy[:3] + [0])
-        self.server.shutdown()
-        self.server.server_close()
+        try:
+            with self.lock:
+                self.send('/setOrchestraPedalSource', 0)
+                self.send('/setOrchestraOccupancy', self.occupancy[:3] + [0])
+                self.send('/subscribeOrchestraState', [self.reply_host, self.server.server_address[1], 0])
+        finally:
+            self.server.shutdown()
+            self.server.server_close()
