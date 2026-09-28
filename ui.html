@@ -625,7 +625,7 @@
   <label style="margin-left:20px">Tracking grace (ms)
     <input id="handGrace" type="number" min="0" max="1000" step="10" value="150" style="width:70px"></label>
   <p id="orchestraPedalStatus" role="status">Receiver not confirmed</p>
-  <small>In orchestra pedal mode: pedal down disables piano; hands enable brass/strings.
+  <small>In orchestra pedal mode: pedal down disables piano; piano also requires a hand outside the red zone. Hands enable brass/strings.
     Changes wait for Input Clear Delay; sounding notes finish.</small>
 </section>
 
@@ -676,7 +676,9 @@
     </div>
     <p class="hint" id="stageHint">Drag the red region to move the exclusion boundary. In
        orchestra mode, drag the amber bar to move the piano split; above it
-       the left hand plays brass and the right strings.</p>
+       the left hand plays brass and the right strings. Each hand holds its last piano
+       position in a 24-semitone window while above the split. Returning to piano
+       resumes tracking; no active hands resets both windows.</p>
   </section>
 
   <section id="logColumn">
@@ -789,7 +791,7 @@
     </div>
     <p id="simPedalState">Physical pedal selected</p>
     <p class="hint" id="simPedalHint">Press leaves the simulated pedal down while you drag hands.
-      Release allows piano again. Leaving this tab restores physical control.</p>
+      Release allows piano while a hand is outside the red zone. Leaving this tab restores physical control.</p>
     <h2 style="margin-top:20px">Zones</h2>
     <div class="mode-toggle" style="margin-top:0; padding-top:0; border-top:none">
       <label><input type="checkbox" id="mockOrchestra"> Orchestra</label>
@@ -1667,7 +1669,7 @@ function renderOrchestraPedal(s) {
   $("simulatePedal").disabled = (!p.requested && gestureOn) || !p.confirmed;
   $("holdPedal").textContent = gestureOn ? "Hold pedal — disable piano" : "Hold pedal — pause ensemble";
   $("simPedalHint").textContent = gestureOn
-    ? "Press leaves the simulated pedal down while you drag hands. Release allows piano again. Leaving this tab restores physical control."
+    ? "Press leaves the simulated pedal down while you drag hands. Release allows piano while a hand is outside the red zone. Leaving this tab restores physical control."
     : "Press pauses the whole ensemble; release resumes it. Leaving this tab restores physical control.";
   for (const id of ["holdPedal", "pressPedal", "releasePedal"])
     $(id).disabled = !p.simulated || (!p.requested && gestureOn) || !p.confirmed;
