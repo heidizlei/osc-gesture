@@ -1048,10 +1048,10 @@ class OSCGestureApp:
             self.active_regions = sorted({self._hand_region(*p) for p in positions})
 
         self._update_hand_presence()
-        self._update_region_engagement()
-        self._send_orchestra_occupancy()
         if positions:
             self._update_output_range(positions)
+        self._update_region_engagement()
+        self._send_orchestra_occupancy()
 
         return frame, results, active_hand_indices
 
@@ -1192,9 +1192,12 @@ class OSCGestureApp:
             self.left_val = self.map_hand_x_to_val(positions[0][0], 'piano')
             self.right_val = self.map_hand_x_to_val(positions[1][0], 'piano')
 
-        # Throttle OSC sends; only fire when change exceeds threshold
+        # Hand count changes alter the available registers, so send them in
+        # this frame before occupancy changes trigger receiver regeneration.
+        # Keep the movement throttle for pitch changes within the same layout.
         now = time.time()
-        if now - self.last_osc_time >= self.osc_interval:
+        layout_changed = self.last_left is None or ((self.right_val is None) != (self.last_right is None))
+        if layout_changed or now - self.last_osc_time >= self.osc_interval:
             left_changed = self.last_left is None or abs(self.left_val - self.last_left) > self.change_threshold
             if self.right_val is None or self.last_right is None:
                 # Hand count changed (or first send): always resend so the
@@ -1427,10 +1430,10 @@ class OSCGestureApp:
         self.hand_present = bool(positions)
         self.active_regions = sorted({self._hand_region(*p) for p in positions})
         self._update_hand_presence()
-        self._update_region_engagement()
-        self._send_orchestra_occupancy()
         if positions:
             self._update_output_range(positions)
+        self._update_region_engagement()
+        self._send_orchestra_occupancy()
 
     def send_manual_osc(self, address, args):
         """Send one OSC message on behalf of the manual tab.
