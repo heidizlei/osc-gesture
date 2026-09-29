@@ -92,6 +92,34 @@ class PianoHandLockTests(unittest.TestCase):
         self.frame((.8, .2, 'Left'))
         self.assertFalse(self.app._piano_hands)
 
+    def test_return_from_strings_waits_for_configured_semitone_threshold(self):
+        self.frame((.75, .5, 'Right'))
+        self.frame((.75, .2, 'Right'))
+        count = len(self.piano_messages())
+        centre = self.app._last_piano_centres[0]
+        for threshold in (2, 7):
+            self.app.change_threshold = threshold
+            for delta in (0, threshold - 1, threshold, -threshold):
+                with patch.object(self.app, 'map_hand_x_to_val', return_value=centre + delta):
+                    self.app.last_osc_time = 0
+                    self.frame((.75, .5, 'Right'))
+                    self.frame((.75, .5, 'Right'))
+                self.assertEqual(len(self.piano_messages()), count)
+                self.assertTrue(self.app._piano_hands['Right']['locked'])
+        with patch.object(self.app, 'map_hand_x_to_val', return_value=centre + 8):
+            self.frame((.75, .5, 'Right'))
+        self.assertEqual(len(self.piano_messages()), count + 1)
+        self.assertFalse(self.app._piano_hands['Right']['locked'])
+
+    def test_other_hand_update_preserves_unchanged_returned_range(self):
+        self.frame((.25, .5, 'Left'), (.75, .5, 'Right'))
+        self.frame((.25, .5, 'Left'), (.75, .2, 'Right'))
+        held_span = self.piano_messages()[-1][3:]
+        self.app.last_osc_time = 0
+        self.frame((.5, .5, 'Left'), (.75, .5, 'Right'))
+        self.assertEqual(self.piano_messages()[-1][3:], held_span)
+        self.assertTrue(self.app._piano_hands['Right']['locked'])
+
     def test_red_zone_clears_both_locks_through_mock_camera_path(self):
         a = self.app
         a.mock_hands = {'Left': (.25, .5), 'Right': (.75, .5)}

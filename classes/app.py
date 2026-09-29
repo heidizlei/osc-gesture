@@ -1231,12 +1231,23 @@ class OSCGestureApp:
 
     def _update_orchestra_piano(self, positions):
         present = set()
+        sent_centres = dict(zip((label for label, _ in (self._last_piano_layout or ())),
+                                self._last_piano_centres))
         for x, y, label in positions:
             label = label or ('Left' if x < _UNLABELLED_HAND_SPLIT else 'Right')
             present.add(label)
             if self._hand_region(x, y, label) == 'piano':
+                centre = self.map_hand_x_to_val(x, 'piano')
+                previous = self._piano_hands.get(label)
+                # Returning from an upper region must not narrow/re-send the
+                # locked window until movement exceeds the configured threshold.
+                # Keep it locked across frames (and other-hand updates) until then.
+                if (previous and previous['locked']
+                        and abs(centre - sent_centres.get(label, previous['centre']))
+                        <= self.change_threshold):
+                    continue
                 self._piano_hands[label] = {
-                    'centre': self.map_hand_x_to_val(x, 'piano'), 'locked': False}
+                    'centre': centre, 'locked': False}
             elif label in self._piano_hands:
                 self._piano_hands[label]['locked'] = True
         # A locked hand may disappear while the other remains active. Keep its
