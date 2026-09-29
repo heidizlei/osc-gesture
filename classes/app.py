@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 from pythonosc import udp_client
 from .orchestra_control import OrchestraControl, HandGrace
-from .orchestra_timing import OrchestraTiming
 from .tracker import HandTracker, HandLandmarkDrawer, list_cameras
 from .gesture_detector import GestureDetector
 from .gesture_sender import GestureSender
@@ -264,8 +263,7 @@ class OSCGestureApp:
         # valid even if a caller swaps out osc_client.
         self.osc_log    = _OSCLog(udp_client.SimpleUDPClient(ip, port))
         self._instr_ids = _load_instrument_ids(orchestra_preset)
-        self.osc_client = OrchestraTiming(self.osc_log.send_message,
-                                         self._instrument_id('piano'))
+        self.osc_client = self.osc_log
         self.orchestra_control = OrchestraControl(self.osc_client.send_message, ip)
         gesture_addresses = {'/setOutputRange', '/setActiveInstruments', '/setForcedInstruments',
                              '/setCameraPause', '/setManualPause', '/playRuns', '/playChords',
@@ -1822,7 +1820,6 @@ class OSCGestureApp:
             print("\nStopping.")
         finally:
             cv2.destroyAllWindows()
-            self.osc_client.close()
             self.orchestra_control.close()
             self.hand_tracker.close()
 
@@ -1846,6 +1843,5 @@ class OSCGestureApp:
             print("\nStopping.")
         finally:
             web.stop()
-            self.osc_client.close()
             self.orchestra_control.close()
             self.hand_tracker.close()
