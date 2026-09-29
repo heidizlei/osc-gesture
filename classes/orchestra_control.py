@@ -112,7 +112,7 @@ class OrchestraControl:
     def set_source(self, simulated):
         with self.lock:
             if simulated and not self.pedal_available:
-                raise ValueError('Enable Pedal controls piano first')
+                raise ValueError('Enable Orchestra mode first')
             if simulated and not self.simulated:
                 self.down = bool(self.status.get('pedalDown', True))
             self.simulated = bool(simulated)

@@ -525,12 +525,14 @@ class OSCGestureApp:
         self.orchestra_split_ratio = float(np.clip(frac, 0.1, 0.9))
 
     def _set_orchestra_mode(self, on):
+        # Orchestra permissions follow the orchestra switch; no separate
+        # piano-pedal mode control is needed in the browser.
+        if self.orchestra_control.gesture_enabled and on != self.orchestra_control.enabled:
+            self.orchestra_control.set_mode(on)
         if on == self.orchestra_mode:
             return
         self._clear_piano_locks()
         self.orchestra_mode = on
-        if not on and self.orchestra_control.enabled:
-            self.orchestra_control.set_mode(False)
         # The regions changed under the hands, so forget the throttle state.
         self._reset_range_throttle()
         # Turning off clears the forced list; turning on states it, since the
@@ -1087,6 +1089,8 @@ class OSCGestureApp:
         if enabled == self._gesture_control_seen:
             return
         self._gesture_control_seen = enabled
+        if enabled and self.orchestra_mode and not self.orchestra_control.enabled:
+            self.orchestra_control.set_mode(True)
         self.hand_grace.seen.clear()
         self._clear_piano_locks()
         self.active_regions = []
