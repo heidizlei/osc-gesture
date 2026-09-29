@@ -1,5 +1,6 @@
 import cv2
 import json
+import math
 import mediapipe as mp
 import numpy as np
 import subprocess
@@ -106,9 +107,14 @@ class HandTracker:
         # the gesture loop; this guards the handoff.
         self._switch_lock = threading.Lock()
         self._pending_index = None
-        self._init_landmarker(use_gpu)
+        self._use_gpu = use_gpu
+        self._confidence_lock = threading.Lock()
+        self._confidence = {'detection': 0.8, 'presence': 0.8, 'tracking': 0.8}
+        self._pending_confidence = None
+        self._confidence_error = None
+        self.landmarker = self._init_landmarker(use_gpu, self._confidence)
 
-    def _init_landmarker(self, use_gpu):
+    def _init_landmarker(self, use_gpu, confidence):
         BaseOptions = mp.tasks.BaseOptions
         HandLandmarker = mp.tasks.vision.HandLandmarker
         HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
@@ -119,10 +125,57 @@ class HandTracker:
             base_options=base_opts,
             running_mode=VisionRunningMode.VIDEO,
             num_hands=2,
-            min_hand_detection_confidence=0.6,
-            min_tracking_confidence=0.6
+            # Require stronger hand evidence to reduce head/background detections.
+            min_hand_detection_confidence=confidence["detection"],
+            min_hand_presence_confidence=confidence["presence"],
+            min_tracking_confidence=confidence["tracking"]
         )
-        self.landmarker = HandLandmarker.create_from_options(options)
+        return HandLandmarker.create_from_options(options)
+
+    def confidence_state(self):
+        with self._confidence_lock:
+            return {'values': dict(self._pending_confidence or self._confidence),
+                    'pending': self._pending_confidence is not None,
+                    'error': self._confidence_error}
+
+    def request_confidence(self, values):
+        if not isinstance(values, dict) or not values:
+            raise ValueError("hand_confidence must be a nonempty object")
+        validated = {}
+        for key, value in values.items():
+            if key not in self._confidence or isinstance(value, bool):
+                raise ValueError(f"invalid hand confidence: {key}")
+            try:
+                value = float(value)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError(f"{key} confidence must be between 0 and 1")
+            if not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"{key} confidence must be between 0 and 1")
+            validated[key] = value
+        with self._confidence_lock:
+            requested = dict(self._pending_confidence or self._confidence)
+            requested.update(validated)
+            self._pending_confidence = requested if requested != self._confidence else None
+            self._confidence_error = None
+
+    def _apply_pending_confidence(self):
+        # Only the capture thread replaces the model, between detections.
+        with self._confidence_lock:
+            requested = self._pending_confidence
+            if requested is None:
+                return
+            try:
+                replacement = self._init_landmarker(self._use_gpu, requested)
+            except Exception as exc:
+                self._confidence_error = f"Could not update hand confidence: {exc}"
+                self._pending_confidence = None
+                return
+            previous = self.landmarker
+            self.landmarker = replacement
+            self._confidence = requested
+            self._pending_confidence = None
+            self._confidence_error = None
+        previous.close()
 
     def _next_timestamp(self):
         """Strictly-increasing millisecond timestamp.
@@ -218,6 +271,7 @@ class HandTracker:
 
     def get_frame_and_landmarks(self, active_area_ratio=1.0):
         self._apply_pending_camera()
+        self._apply_pending_confidence()
         if not self.cap.isOpened() and not self._reopen_camera():
             return None, None
         ret, frame = self.cap.read()

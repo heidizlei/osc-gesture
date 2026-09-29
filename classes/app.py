@@ -329,7 +329,7 @@ class OSCGestureApp:
         # Orchestra mode: the active region splits into a piano half (bottom)
         # and a brass/strings half (top), where the left hand plays brass and
         # the right strings.
-        self.orchestra_mode = False
+        self.orchestra_mode = True
         # Fraction of the active region, so the divider stays valid when the
         # exclusion boundary moves. Above it = brass/strings, below = piano.
         self.orchestra_split_ratio = 0.5
@@ -1622,6 +1622,7 @@ class OSCGestureApp:
             'osc_seq':        osc_seq,
             'camera':           self.hand_tracker.camera_index,
             'camera_error':     self.hand_tracker.camera_error,
+            'hand_confidence':  self.hand_tracker.confidence_state(),
             'view':             self.view_requested(),
             'mock_hands':       {k: [round(v[0], 4), round(v[1], 4)]
                                  for k, v in self.mock_hands.items()},
@@ -1652,6 +1653,8 @@ class OSCGestureApp:
 
         Raises ValueError on an unknown preset so the handler can answer 400.
         """
+        if 'hand_confidence' in payload:
+            self.hand_tracker.request_confidence(payload['hand_confidence'])
         if 'gesture_control' in payload:
             self.orchestra_control.set_gesture_control(bool(payload['gesture_control']))
         if 'orchestra_pedal_mode' in payload:
