@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from pythonosc import udp_client
 from .orchestra_control import OrchestraControl, HandGrace
+from .orchestra_timing import OrchestraTiming
 from .tracker import HandTracker, HandLandmarkDrawer, list_cameras
 from .gesture_detector import GestureDetector
 from .gesture_sender import GestureSender
@@ -262,7 +263,9 @@ class OSCGestureApp:
         # terminal prints. Both names point at the wrapper; osc_log stays
         # valid even if a caller swaps out osc_client.
         self.osc_log    = _OSCLog(udp_client.SimpleUDPClient(ip, port))
-        self.osc_client = self.osc_log
+        self._instr_ids = _load_instrument_ids(orchestra_preset)
+        self.osc_client = OrchestraTiming(self.osc_log.send_message,
+                                         self._instrument_id('piano'))
         self.orchestra_control = OrchestraControl(self.osc_client.send_message, ip)
         gesture_addresses = {'/setOutputRange', '/setActiveInstruments', '/setForcedInstruments',
                              '/setCameraPause', '/setManualPause', '/playRuns', '/playChords',
@@ -338,7 +341,6 @@ class OSCGestureApp:
         self.piano_only = True
         self._instr_state = {name: {'last_val': None, 'last_time': 0.0}
                              for name in ('brass', 'strings')}
-        self._instr_ids = _load_instrument_ids(orchestra_preset)
         self.active_regions = []
         # Per-region "a hand was here last frame", so a reset fires on the
         # transition to empty rather than on every empty frame.
@@ -1820,6 +1822,7 @@ class OSCGestureApp:
             print("\nStopping.")
         finally:
             cv2.destroyAllWindows()
+            self.osc_client.close()
             self.orchestra_control.close()
             self.hand_tracker.close()
 
@@ -1843,5 +1846,6 @@ class OSCGestureApp:
             print("\nStopping.")
         finally:
             web.stop()
+            self.osc_client.close()
             self.orchestra_control.close()
             self.hand_tracker.close()
