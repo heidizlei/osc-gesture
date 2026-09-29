@@ -252,7 +252,8 @@ class OSCGestureApp:
                  ip="0.0.0.0",
                  port=9001,
                  preset="range",
-                 orchestra_preset=None):
+                 orchestra_preset=None,
+                 camera_url=None):
         # Output window around the mapped pitch, as (low, high) offsets. Its
         # width is what the range-window slider sets.
         self.interval = (-8, 8)
@@ -277,6 +278,7 @@ class OSCGestureApp:
         self.hand_tracker = HandTracker(
             model_path=_resource_path(model_path),
             camera_index=camera_index,
+            camera_url=camera_url,
             use_gpu=False   # GPU = leaks on macOS; CPU recommended
         )
 
@@ -1016,6 +1018,19 @@ class OSCGestureApp:
         frame, results = self.hand_tracker.get_frame_and_landmarks(
             active_area_ratio=self.active_area_ratio)
         if frame is None:
+            if self.hand_tracker.camera_url:
+                if not self.hand_tracker.cap.stale:
+                    return None, None, []
+                self.hand_present = False
+                self.active_regions = []
+                self.hand_grace.seen.clear()
+                self.gesture_detector.reset()
+                self.gesture_result = ('noop', 0.0)
+                self._update_hand_presence()
+                self._update_region_engagement()
+                self._send_orchestra_occupancy()
+                self._publish_frame(None, None, [])
+                return None, None, []
             self.hand_present = False
             self.active_regions = (self.hand_grace.update([], [], self._hand_region,
                 time.monotonic(), self.hand_grace_ms / 1000)
@@ -1546,6 +1561,9 @@ class OSCGestureApp:
         Cached: enumerating means opening every device in turn. `refresh`
         rebuilds it, which is how a camera plugged in after startup shows up.
         """
+        if self.hand_tracker.camera_url:
+            return {'cameras': [{'index': 0, 'name': 'Remote MJPEG camera'}],
+                    'current': 0, 'error': self.hand_tracker.camera_error}
         with self._camera_lock:
             if self._camera_cache is None or refresh:
                 self._camera_cache = list_cameras(

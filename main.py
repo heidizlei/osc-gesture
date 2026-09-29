@@ -16,6 +16,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OSC gesture controller")
     parser.add_argument("--host",    default="127.0.0.1", help="OSC target host")
     parser.add_argument("--port",    default=9001, type=int,  help="OSC target port")
+    parser.add_argument("--camera-url", help="HTTP(S) MJPEG camera stream URL")
     parser.add_argument("--ui", choices=("web", "cv2"), default="web",
                         help="web: browser UI with buttons/sliders (default); "
                              "cv2: legacy OpenCV window")
@@ -34,7 +35,14 @@ if __name__ == "__main__":
                              "those are set in the UI")
     args = parser.parse_args()
 
+    if args.camera_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(args.camera_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            parser.error("--camera-url must be an HTTP(S) stream URL")
+
     app = OSCGestureApp(ip=args.host, port=args.port,
+                        camera_url=args.camera_url,
                         orchestra_preset=args.orchestra_preset)
     if args.ui == "web" and getattr(sys, "frozen", False) and sys.platform == "darwin":
         # The .app needs a native event loop to be quittable from the Dock;

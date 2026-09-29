@@ -614,3 +614,16 @@ xcrun notarytool store-credentials osc-gesture \
 - `classes/mac_app.py` — native macOS event loop for the packaged `.app`
 - `osc-gesture.spec`, `packaging/` — PyInstaller spec, signing and notarization scripts
 - `recordings/` — recorded `.npz` gesture clips
+
+## Remote stage camera
+
+Run the standalone [camera server](camera_server/README.md) on a Mac mini with
+its webcam attached, then receive its MJPEG feed on the Linux desktop:
+
+```bash
+python main.py --camera-url http://<mac-mini-ip>:8080/stream
+```
+
+Tracking, gesture detection, OSC output and the web UI run on Linux. The network
+receiver keeps only the latest frame and reconnects after stream failures.
+Without `--camera-url`, local webcam behavior is unchanged.

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from .mjpeg_capture import MJPEGCapture
 from mediapipe.framework.formats import landmark_pb2
 from mediapipe.python.solutions import drawing_utils as mp_drawing
 
@@ -93,10 +94,11 @@ class HandLandmarkDrawer:
         return annotated_image
 
 class HandTracker:
-    def __init__(self, model_path="hand_landmarker.task", camera_index=0, use_gpu=True):
+    def __init__(self, model_path="hand_landmarker.task", camera_index=0, use_gpu=True, camera_url=None):
         self.model_path = model_path
         self.camera_index = camera_index
-        self.cap = cv2.VideoCapture(self.camera_index)
+        self.camera_url = camera_url
+        self.cap = MJPEGCapture(camera_url) if camera_url else cv2.VideoCapture(self.camera_index)
         self.camera_error = None   # last failed switch, for the web UI
         self._rgb = None      # reusable detection buffer, sized on first frame
         self._last_ts = 0     # monotonic watermark for MediaPipe timestamps
@@ -180,6 +182,8 @@ class HandTracker:
         get_frame_and_landmarks. A second request before the loop gets round to
         the first simply replaces it.
         """
+        if self.camera_url:
+            raise ValueError("Camera source is set by --camera-url; restart without it to use local cameras")
         index = int(index)
         with self._switch_lock:
             self._pending_index = index
@@ -217,6 +221,8 @@ class HandTracker:
         if not self.cap.isOpened() and not self._reopen_camera():
             return None, None
         ret, frame = self.cap.read()
+        if self.camera_url:
+            self.camera_error = self.cap.error
         if not ret:
             return None, None
         frame = cv2.flip(frame, 1)

@@ -140,11 +140,39 @@ class PianoHandLockTests(unittest.TestCase):
         a._pedal_mode_seen = True
         a.view = 'gesture'
         a.hand_grace_ms = 150
-        a.hand_tracker = Mock()
+        a.hand_tracker = Mock(camera_url=None)
         a.hand_tracker.get_frame_and_landmarks.return_value = (None, None)
         a._step()
         self.assertFalse(a._piano_hands)
         self.assertEqual(self.piano_messages()[-1], [1, 24, 108, -1, -1])
+
+    def test_remote_frame_gap_retains_locks_until_stream_is_stale(self):
+        a = self.app
+        self.frame((.25, .5, 'Left'))
+        self.frame((.25, .2, 'Left'))
+        a._sync_gesture_control = Mock()
+        a._apply_pending_view = Mock()
+        a._pedal_mode_seen = True
+        a.view = 'gesture'
+        a.hand_grace_ms = 150
+        a.hand_tracker = Mock(camera_url='http://stage/stream')
+        a.hand_tracker.cap.stale = False
+        a.hand_tracker.get_frame_and_landmarks.return_value = (None, None)
+        a.gesture_detector = Mock()
+        a._publish_frame = Mock()
+        a._step()
+        self.assertTrue(a._piano_hands)
+        a._update_hand_presence.assert_not_called()
+        a.gesture_detector.reset.assert_not_called()
+
+        a.hand_tracker.cap.stale = True
+        a._step()
+        self.assertFalse(a._piano_hands)
+        self.assertFalse(a.hand_present)
+        self.assertEqual(self.piano_messages()[-1], [1, 24, 108, -1, -1])
+        a._update_hand_presence.assert_called_once()
+        a.gesture_detector.reset.assert_called_once()
+        a._publish_frame.assert_called_once_with(None, None, [])
 
     def test_non_orchestra_piano_keeps_original_window(self):
         self.app.orchestra_mode = False
