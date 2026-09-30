@@ -5,6 +5,25 @@ pitch range, and playback style (runs/chords).
 
 ## Setup
 
+On Ubuntu/Debian Linux, create a virtual environment and install Python and
+system dependencies with:
+
+```bash
+bash setup_linux.sh
+source .venv/bin/activate
+python main.py --camera-url http://<macbook-ip>:8080/stream
+```
+
+Install Python 3.10–3.12 first. The script selects an installed compatible
+interpreter, or accepts `PYTHON=python3.12 bash setup_linux.sh`. Run it as your
+normal user; it uses `sudo` for system packages. It can be rerun to update an
+existing `.venv`. On other Linux distributions, install Python's venv support,
+OpenGL, GLib, and EGL libraries with your package manager, then run
+`bash setup_linux.sh --skip-system`. The final check imports the application
+without opening the camera.
+
+For a manually managed Python environment:
+
 ```bash
 pip install -r requirements.txt
 ```
