@@ -635,6 +635,7 @@
 <section style="margin:12px 20px;padding:12px;border:1px solid #46505d;border-radius:8px">
   <button type="button" id="gestureControl" aria-pressed="true">Gesture control: On</button>
   <span id="gestureControlStatus" role="status"></span>
+  <button type="button" id="stageGestureView" aria-pressed="false" hidden>Show gesture view: Off</button>
   <br>
   <label>Tracking grace (ms)
     <input id="handGrace" type="number" min="0" max="1000" step="10" value="150" style="width:70px"></label>
@@ -1711,6 +1712,7 @@ for (const [v, ui] of Object.entries(VIEW_UI)) {
 // Shared receiver-backed orchestra controls.
 $("gestureControl").addEventListener("click", () =>
   send({gesture_control: state?.orchestra_pedal?.gesture_enabled === false}));
+$("stageGestureView").addEventListener("click", () => send({gesture_view: state?.gesture_view !== true}));
 $("handGrace").addEventListener("change", e => send({hand_grace_ms:Number(e.target.value)}));
 $("simulatePedal").addEventListener("change", e => send({simulated_pedal:e.target.checked}));
 const pedal = down => send({pedal_down:down});
@@ -1743,6 +1745,9 @@ function renderOrchestraPedal(s) {
   $("gestureControl").disabled = !!p.gesture_pending;
   $("gestureControlStatus").textContent = p.gesture_pending ? "Waiting for JordanAI…"
     : gestureOn ? "" : "Normal pedal · piano, strings and brass · preset ranges";
+  $("stageGestureView").hidden = s.gesture_view == null;
+  $("stageGestureView").textContent = `Show gesture view: ${s.gesture_view ? "On" : "Off"}`;
+  $("stageGestureView").setAttribute("aria-pressed", String(!!s.gesture_view));
   if (document.activeElement !== $("handGrace")) $("handGrace").value = s.hand_grace_ms ?? 150;
   $("simulatePedal").checked = !!p.simulated;
   $("simulatePedal").disabled = (!p.requested && gestureOn) || !p.confirmed;

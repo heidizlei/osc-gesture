@@ -5,6 +5,8 @@ import struct
 import threading
 import time
 
+from pythonosc.dispatcher import Dispatcher
+from pythonosc.osc_server import ThreadingOSCUDPServer
 from pythonosc.udp_client import SimpleUDPClient
 
 
@@ -13,6 +15,8 @@ MAX_VALUE = 0xffffffff
 CHANNEL = 15
 PERIOD = 0.020
 CAPTURE_TIMEOUT = 0.100
+VIEW_CONTROLLER = 30
+VIEW_ADDRESS = '/showGestureView'
 
 
 def normalized(value):
@@ -22,8 +26,13 @@ def normalized(value):
     return min(1.0, max(0.0, value))
 
 
-def encode_snapshot(hands, split, cutoff, sequence, now, group=1):
-    """Encode channel 16 CC 20..29; coordinates use full-range uint32."""
+def encode_snapshot(hands, split, cutoff, sequence, now, group=1, view=False):
+    """Encode channel 16 CC 20..30; coordinates use full-range uint32.
+
+    CC 30 is the stage view: 0 for the score, MIDI 1.0 127 (upscaled to
+    0xffffffff) for the gesture view. It rides in every snapshot as state, so a
+    lost packet or a freshly loaded page picks it up from the next one.
+    """
     if not 1 <= group <= 16:
         raise ValueError('Group must be 1..16')
     if not 0 <= split <= cutoff <= 1:
@@ -38,7 +47,8 @@ def encode_snapshot(hands, split, cutoff, sequence, now, group=1):
             values.extend((round(normalized(x) * MAX_VALUE),
                            round(normalized(y) * MAX_VALUE), MAX_VALUE,
                            INSTRUMENTS[instrument]))
-    values.extend((round(split * MAX_VALUE), round(cutoff * MAX_VALUE)))
+    values.extend((round(split * MAX_VALUE), round(cutoff * MAX_VALUE),
+                   MAX_VALUE if view else 0))
     header = struct.pack('>BBHHHQQQ', 1, 0, 1 << CHANNEL,
                          sequence & 0xffff, 0, now, now, now)
     words = [0x00400000, 0x003003c0]
@@ -50,19 +60,44 @@ def encode_snapshot(hands, split, cutoff, sequence, now, group=1):
 
 
 class MidiStateSender:
-    def __init__(self, host, port=4200, group=1, stream=0):
+    def __init__(self, host, port=4200, group=2, stream=0, view_port=None):
         if not 1 <= group <= 16 or not 0 <= stream <= 255 or not 1 <= port <= 65535:
             raise ValueError('Invalid MIDI State port, group, or stream')
+        if view_port is not None and not 1 <= view_port <= 65535:
+            raise ValueError('Invalid gesture view OSC port')
         self.client = SimpleUDPClient(host, port)
         self.address = f'/midi-state/{group}/{stream}'
         self.group = group
         self.sequence = 0
         self.lock = threading.Lock()
         self.snapshot = ({}, .375, .75, float('-inf'))
+        self.view = False
         self.stop_event = threading.Event()
         self.last_error = None
         self.thread = threading.Thread(target=self._run, name='midi-state', daemon=True)
         self.thread.start()
+        self.view_server = None
+        if view_port is not None:
+            dispatcher = Dispatcher()
+            dispatcher.map(VIEW_ADDRESS, self._receive_view)
+            self.view_server = ThreadingOSCUDPServer(('0.0.0.0', view_port), dispatcher)
+            threading.Thread(target=self.view_server.serve_forever, name='midi-state-view',
+                             daemon=True).start()
+
+    def set_view(self, gesture):
+        """Show the gesture view on the stage (True) or the score (False)."""
+        with self.lock:
+            self.view = bool(gesture)
+
+    def _receive_view(self, address, *args):
+        # `/showGestureView 1` (or 127) shows gestures, `/showGestureView 0` the
+        # score. Anything unreadable is ignored rather than guessed.
+        if len(args) != 1 or isinstance(args[0], str):
+            return
+        try:
+            self.set_view(float(args[0]) != 0)
+        except (TypeError, ValueError):
+            return
 
     def update(self, positions, split, cutoff, region_for):
         hands = {}
@@ -82,10 +117,11 @@ class MidiStateSender:
     def _send(self, missing=False):
         with self.lock:
             hands, split, cutoff, captured = self.snapshot
+            view = self.view and not missing
         if missing or time.monotonic() - captured > CAPTURE_TIMEOUT:
             hands = {}
         clip = encode_snapshot(hands, split, cutoff, self.sequence,
-                               time.monotonic_ns(), self.group)
+                               time.monotonic_ns(), self.group, view)
         self.sequence = (self.sequence + 1) & 0xffff
         self.client.send_message(self.address, clip)
 
@@ -105,6 +141,10 @@ class MidiStateSender:
             self.stop_event.wait(remaining)
 
     def close(self):
+        # The final snapshot also hands the stage back to the score.
+        if self.view_server is not None:
+            self.view_server.shutdown()
+            self.view_server.server_close()
         self.stop_event.set()
         self.thread.join(timeout=1)
         if not self.thread.is_alive():

@@ -1762,6 +1762,9 @@ class OSCGestureApp:
             'orchestra':        self.orchestra_mode,
             'piano_only':       self.piano_only,
             'orchestra_pedal':  self.orchestra_control.state(),
+            # None when no MIDI State publisher runs, so the UI hides the toggle.
+            'gesture_view':     (self.midi_state_sender.view
+                                 if getattr(self, 'midi_state_sender', None) else None),
             'hand_grace_ms':    self.hand_grace_ms,
             'orchestra_split':  round(self._orchestra_split_y(), 4),
             'active_regions':   list(self.active_regions),
@@ -1790,6 +1793,11 @@ class OSCGestureApp:
             self.hand_tracker.request_confidence(payload['hand_confidence'])
         if 'gesture_control' in payload:
             self.orchestra_control.set_gesture_control(bool(payload['gesture_control']))
+        if 'gesture_view' in payload:
+            sender = getattr(self, 'midi_state_sender', None)
+            if sender is None:
+                raise ValueError('Start with --midi-state-host to switch the stage view')
+            sender.set_view(bool(payload['gesture_view']))
         if 'orchestra_pedal_mode' in payload:
             if payload['orchestra_pedal_mode']:
                 self._set_orchestra_mode(True)
