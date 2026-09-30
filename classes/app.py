@@ -66,6 +66,13 @@ _UNLABELLED_HAND_SPLIT = 0.5
 # when orchestra mode adds and removes the other two.
 _RANGE_BAR_ORDER = ('piano', 'brass', 'strings')
 
+# Output windows the range sliders set: one per instrument, plus a second
+# piano window for a piano hand that has gone up into the brass/strings zone
+# and left its piano range locked, so the piano can sit narrower while the
+# orchestra plays.
+_PIANO_ORCHESTRA = 'piano_orchestra'
+_WINDOW_ORDER = ('piano', _PIANO_ORCHESTRA, 'brass', 'strings')
+
 # Widest output window the range slider allows, in semitones. Three octaves
 # is already far past what a hand position can usefully aim at.
 _MAX_RANGE_WINDOW = 36
@@ -157,6 +164,14 @@ def _jsonable(value):
     return value
 
 
+# Where the web UI's "Save settings" button writes, and startup reads back:
+# the osc-gesture folder, or beside the executable in a frozen build, whose
+# bundled files live in a temp dir that is deleted at exit.
+_SETTINGS_PATH = os.path.join(
+    os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+    else os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "settings.json")
+
 # The tabs the web UI offers; only 'gesture' wants the camera.
 _VIEWS = ('gesture', 'manual', 'mock')
 
@@ -229,8 +244,10 @@ class _OSCLog:
 _WINDOW_NAME = "Hand Camera"
 _BOUNDARY_TRACKBAR = "Active area %"
 # One range-window trackbar per instrument, in the range bars' row order.
-_WINDOW_TRACKBARS = {region: f"{region.capitalize()} window st"
-                     for region in _RANGE_BAR_ORDER}
+_WINDOW_TRACKBARS = {'piano': "Piano window st",
+                     _PIANO_ORCHESTRA: "Piano orch window st",
+                     'brass': "Brass window st",
+                     'strings': "Strings window st"}
 
 
 class OSCGestureApp:
@@ -258,10 +275,12 @@ class OSCGestureApp:
                  port=9001,
                  preset="range",
                  orchestra_preset=None,
-                 camera_url=None):
+                 camera_url=None,
+                 settings_path=None):
         # Output window around each region's mapped pitch, as (low, high)
-        # offsets. Each width is what that instrument's window slider sets.
-        self.intervals = {region: (-8, 8) for region in _RANGE_BAR_ORDER}
+        # offsets. Each width is what that instrument's window slider sets;
+        # see _WINDOW_ORDER for the extra locked-piano window.
+        self.intervals = {region: (-8, 8) for region in _WINDOW_ORDER}
 
         # OSC client, wrapped so the web UI can show the same feed the
         # terminal prints. Both names point at the wrapper; osc_log stays
@@ -397,6 +416,10 @@ class OSCGestureApp:
         self._last_frame_time = None
         self._tint = None       # cached solid-colour buffer for the cv2 overlay
 
+        # Saved sliders and toggles override the defaults above.
+        self.settings_path = settings_path or _SETTINGS_PATH
+        self.load_settings()
+
 
     # ----------------------------
     # Presets
@@ -484,7 +507,7 @@ class OSCGestureApp:
     @interval.setter
     def interval(self, offsets):
         """Set every region's window offsets at once."""
-        self.intervals = {region: tuple(offsets) for region in _RANGE_BAR_ORDER}
+        self.intervals = {region: tuple(offsets) for region in _WINDOW_ORDER}
 
     def _window_around(self, val, region='piano'):
         """(low, high) output window around one mapped pitch, valid MIDI."""
@@ -534,6 +557,12 @@ class OSCGestureApp:
             return
         for r in changed:
             self.intervals[r] = offsets
+        if region == _PIANO_ORCHESTRA:
+            # Unlike the other sliders, this one is for adjusting while the
+            # hands are up, so it resizes locked piano windows in place.
+            for hand in self._piano_hands.values():
+                if hand['locked']:
+                    hand['home_window'] = self._window_around(hand['centre'], _PIANO_ORCHESTRA)
         # Every live range is now stale by the amount the window changed.
         self._reset_range_throttle()
         print(f"Range window {'/'.join(changed)}: {size} semitones {offsets}")
@@ -1377,7 +1406,8 @@ class OSCGestureApp:
             elif label in self._piano_hands:
                 hand = self._piano_hands[label]
                 if not hand['locked']:
-                    hand['home_window'] = self._window_around(hand['centre'])
+                    hand['home_window'] = self._window_around(hand['centre'],
+                                                              _PIANO_ORCHESTRA)
                     hand['locked'] = True
         # A locked hand may disappear while the other remains active. Keep its
         # lock; only an unlocked, absent hand loses its individual window.
@@ -1784,6 +1814,60 @@ class OSCGestureApp:
             }
         return state
 
+    def settings(self):
+        """The sliders and toggles the UI can save, as an apply_control payload.
+
+        Receiver-owned state (gesture control, pedal source) and the camera
+        index, which can change between boots, are left out.
+        """
+        return {
+            'preset':          self.preset,
+            'view':            self.view_requested(),
+            'active_area':     self.active_area_ratio,
+            'orchestra':       self.orchestra_mode,
+            'piano_only':      self.piano_only,
+            'orchestra_split_ratio': self.orchestra_split_ratio,
+            'draw_landmarks':  self.draw_landmarks,
+            'debug':           self.debug_mode,
+            'hand_confidence': self.hand_tracker.confidence_state()['values'],
+            'hand_grace_ms':   self.hand_grace_ms,
+            'range_window':    self.range_windows,
+            'instr_range':     {r: list(b) for r, b in self.instr_ranges.items()},
+        }
+
+    def save_settings(self):
+        """Write settings() to settings_path, replacing it atomically."""
+        path = self.settings_path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_jsonable(self.settings()), f, indent=2)
+        os.replace(tmp, path)
+        print("Saved settings to", path)
+
+    def load_settings(self):
+        """Apply a saved settings file, if there is one.
+
+        Each key is applied on its own so one stale or invalid value only
+        loses that setting, not the rest.
+        """
+        try:
+            with open(self.settings_path) as f:
+                saved = json.load(f)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as e:
+            print(f"Ignoring settings file {self.settings_path}: {e}")
+            return
+        if not isinstance(saved, dict):
+            print(f"Ignoring settings file {self.settings_path}: not an object")
+            return
+        for key, value in saved.items():
+            try:
+                self.apply_control({key: value})
+            except (TypeError, ValueError) as e:
+                print(f"Ignoring saved {key}: {e}")
+
     def apply_control(self, payload):
         """Apply a control message from the browser and return the new state.
 
@@ -1860,6 +1944,14 @@ class OSCGestureApp:
             self._set_piano_only(bool(payload['piano_only']))
         if 'orchestra_split' in payload:
             self._set_orchestra_split(payload['orchestra_split'])
+        if 'orchestra_split_ratio' in payload:
+            self.orchestra_split_ratio = float(np.clip(float(payload['orchestra_split_ratio']),
+                                                       0.1, 0.9))
+        if payload.get('save_settings'):
+            try:
+                self.save_settings()
+            except OSError as e:
+                raise ValueError(f"could not save settings: {e}")
         if payload.get('clear_osc'):
             self.osc_log.clear()
         if payload.get('quit'):

@@ -307,7 +307,22 @@ class PianoHandLockTests(unittest.TestCase):
                 if call.args[0] == '/setOutputRange' and call.args[1][0] == 48]
         self.assertEqual(sent[-1][2] - sent[-1][1], 20)
         self.assertEqual(self.app.range_windows,
-                         {'piano': 12, 'brass': 4, 'strings': 20})
+                         {'piano': 12, 'piano_orchestra': 12, 'brass': 4, 'strings': 20})
+
+    def test_locked_piano_uses_its_own_orchestra_window(self):
+        self.app._set_range_window(6, 'piano_orchestra')
+        self.frame((.25, .5, 'Left'), (.75, .5, 'Right'))
+        playing = self.piano_messages()[-1]
+        self.assertEqual(playing[2] - playing[1], 12)
+        self.frame((.25, .2, 'Left'), (.75, .5, 'Right'))
+        held = self.piano_messages()[-1]
+        self.assertEqual(held[2] - held[1], 6)
+        self.assertEqual((held[1] + held[2]) // 2, (playing[1] + playing[2]) // 2)
+        self.assertEqual(held[4] - held[3], 12)
+        # Dragging it while the hand is up resizes the held window in place.
+        self.app._set_range_window(10, 'piano_orchestra')
+        self.frame((.25, .2, 'Left'), (.75, .5, 'Right'))
+        self.assertEqual(self.piano_messages()[-1][2] - self.piano_messages()[-1][1], 10)
 
     def test_failed_camera_frame_clears_locks_after_grace(self):
         a = self.app

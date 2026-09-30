@@ -351,6 +351,7 @@
   .rw-row span { font-size: 0.63rem; color: #6f6f6f; font-variant-numeric: tabular-nums; }
   /* One window slider per instrument, tinted like its range bar. */
   .rw-row[data-window="piano"] input   { accent-color: #6cbfff; }
+  .rw-row[data-window="piano_orchestra"] input { accent-color: #6cbfff; }
   .rw-row[data-window="strings"] input { accent-color: #e891d8; }
   .rw-row[data-window="brass"] input   { accent-color: #f5a73c; }
 
@@ -629,6 +630,8 @@
   </div>
   <span class="stat" id="fps">— fps</span>
   <span class="dot" id="handDot" title="hand detected in active area"></span>
+  <button type="button" id="saveSettings"
+          title="save every slider and toggle so the app reopens with them">Save settings</button>
 </header>
 
 <div id="err"></div>
@@ -640,8 +643,6 @@
   <label>Tracking grace (ms)
     <input id="handGrace" type="number" min="0" max="1000" step="10" value="150" style="width:70px"></label>
   <p id="orchestraPedalStatus" role="status">Receiver not confirmed</p>
-  <small>In orchestra pedal mode: pedal down disables piano; piano also requires a hand outside the red zone. Hands enable brass/strings.
-    Changes wait for Input Clear Delay; sounding notes finish.</small>
 </section>
 
 <div id="gestureView">
@@ -734,6 +735,12 @@
         <label for="rangeWindowPiano">piano</label>
         <input type="range" id="rangeWindowPiano" min="1" max="36" step="1" value="16"
                title="piano output window width">
+        <span>16 st</span>
+      </div>
+      <div class="rw-row" data-window="piano_orchestra">
+        <label for="rangeWindowPianoOrchestra">piano ↑</label>
+        <input type="range" id="rangeWindowPianoOrchestra" min="1" max="36" step="1" value="16"
+               title="piano window held while a hand plays brass or strings">
         <span>16 st</span>
       </div>
       <div class="rw-row" data-window="strings">
@@ -966,10 +973,20 @@ async function send(payload) {
     // poll owns the log's sequence tracking.
     apply(data, { osc: false });
     showError(null);
+    return true;
   } catch (e) {
     showError("Control failed: " + e.message);
+    return false;
   }
 }
+
+$("saveSettings").addEventListener("click", async e => {
+  const btn = e.currentTarget;
+  if (await send({ save_settings: true })) {
+    btn.textContent = "Saved ✓";
+    setTimeout(() => { btn.textContent = "Save settings"; }, 1500);
+  }
+});
 
 function showError(msg) {
   const el = $("err");
