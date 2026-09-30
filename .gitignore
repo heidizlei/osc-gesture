@@ -65,3 +65,6 @@ local.mk
 
 # Local gesture recordings (kept on disk, not tracked)
 recordings/
+
+# Local analysis scripts and generated plots
+/analysis/

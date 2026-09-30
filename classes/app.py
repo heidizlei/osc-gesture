@@ -11,6 +11,7 @@ from .orchestra_control import OrchestraControl, HandGrace
 from .tracker import HandTracker, HandLandmarkDrawer, list_cameras
 from .gesture_detector import GestureDetector
 from .gesture_sender import GestureSender
+from .boundary_gate import BoundaryGate
 import gc
 
 
@@ -72,6 +73,8 @@ _MAX_RANGE_WINDOW = 36
 # Valid MIDI note numbers. A wide window around a pitch near either end of
 # the mapping would otherwise run past them.
 _MIDI_LOW, _MIDI_HIGH = 0, 127
+_STRINGS_OFFSET = 6
+_PIANO_STRINGS_MAX_OVERLAP = 12  # distinct MIDI pitches, including endpoints
 
 # Playing range per region, as (low, high) MIDI notes. These are hard-coded
 # rather than read from a preset: they're where the UI's note boxes start,
@@ -272,6 +275,7 @@ class OSCGestureApp:
                                                    or address not in gesture_addresses)
         self._gesture_control_seen = True
         self.hand_grace = HandGrace()
+        self.boundary_gate = BoundaryGate()
         self.hand_grace_ms = 150
         self._pedal_mode_seen = False
 
@@ -443,6 +447,32 @@ class OSCGestureApp:
             if self._hand_position(hand)[1] <= self.active_area_ratio
         ]
 
+    def _gate_positions(self, positions):
+        if not self.orchestra_mode:
+            return [p for p in positions if p[1] <= self.active_area_ratio]
+        if not hasattr(self, 'boundary_gate'):
+            self.boundary_gate = BoundaryGate()
+        accepted = self.boundary_gate.update(positions, self.active_area_ratio,
+                                             time.monotonic())
+        self._boundary_retained = {p[2] for p in accepted}
+        return accepted
+
+    def _range_ready_positions(self, positions):
+        if not self.orchestra_mode:
+            return positions
+        return [p for p in positions
+                if p[2] in self.boundary_gate.ready | self.boundary_gate.entered]
+
+    def _send_position_updates(self, positions):
+        # Send entry ranges before any resume, activation, or force messages
+        # in this same update cycle; only subsequent movement is throttled.
+        range_positions = self._range_ready_positions(positions)
+        if range_positions:
+            self._update_output_range(range_positions)
+        self._update_hand_presence()
+        self._update_region_engagement()
+        self._send_orchestra_occupancy()
+
     def _window_around(self, val):
         """(low, high) output window around one mapped pitch, valid MIDI."""
         lo, hi = self.interval
@@ -533,6 +563,7 @@ class OSCGestureApp:
             return
         self._clear_piano_locks()
         self.orchestra_mode = on
+        self.boundary_gate.clear()
         # The regions changed under the hands, so forget the throttle state.
         self._reset_range_throttle()
         # Turning off clears the forced list; turning on states it, since the
@@ -948,6 +979,10 @@ class OSCGestureApp:
         c_low, c_high = self._centre_bounds(region)
         start, span = _REGION_SPAN[region]
         val = c_low + (x_norm - start) / span * (c_high - c_low)
+        if region == 'strings':
+            # Raise strings by a tritone, stopping the whole window at the
+            # configured upper note rather than narrowing it at the ceiling.
+            val = min(val + _STRINGS_OFFSET, self.instr_ranges[region][1] - self.interval[1])
         return int(round(max(_MIDI_LOW, min(_MIDI_HIGH, val))))
 
 
@@ -994,6 +1029,7 @@ class OSCGestureApp:
         if enabled != self._pedal_mode_seen:
             self._pedal_mode_seen = enabled
             self.hand_grace.seen.clear()
+            self.boundary_gate.clear()
             if enabled:
                 self.orchestra_mode = True
                 self._send_orchestra_occupancy()
@@ -1023,6 +1059,7 @@ class OSCGestureApp:
             if self.hand_tracker.camera_url:
                 if not self.hand_tracker.cap.stale:
                     return None, None, []
+                self._gate_positions([])
                 self.hand_present = False
                 self.active_regions = []
                 self.hand_grace.seen.clear()
@@ -1033,6 +1070,7 @@ class OSCGestureApp:
                 self._send_orchestra_occupancy()
                 self._publish_frame(None, None, [])
                 return None, None, []
+            self._gate_positions([])
             self.hand_present = False
             self.active_regions = (self.hand_grace.update([], [], self._hand_region,
                 time.monotonic(), self.hand_grace_ms / 1000)
@@ -1046,7 +1084,14 @@ class OSCGestureApp:
         self._tick_fps()
 
         active_hand_indices = self._active_hand_indices(results)
-        self.hand_present = bool(active_hand_indices)
+        all_positions = [self._hand_position(hand) + (self._handedness(results, i),)
+                         for i, hand in enumerate((results.hand_landmarks or [])[:2])]
+        positions = self._gate_positions(all_positions)
+        if self.orchestra_mode:
+            active_hand_indices = [i for i, (x, y, label) in enumerate(all_positions)
+                                   if (label or ('Left' if x < 0.5 else 'Right'))
+                                   in self.boundary_gate.ready]
+        self.hand_present = bool(positions)
 
         # Gesture detection (runs every frame, reports every 500 ms).
         # Hands below the red boundary are excluded from gesture, range,
@@ -1066,21 +1111,15 @@ class OSCGestureApp:
 
         # (x, y, handedness) per active hand: the zone above the piano
         # divider follows the hand, not its position.
-        positions = [self._hand_position(results.hand_landmarks[i])
-                     + (self._handedness(results, i),)
-                     for i in active_hand_indices]
         if self.orchestra_control.enabled:
-            observed = [self._handedness(results, i) for i in range(len(results.hand_landmarks or []))]
+            observed = [label or ('Left' if x < 0.5 else 'Right')
+                        for x, y, label in all_positions]
             self.active_regions = self.hand_grace.update(positions, observed, self._hand_region,
                 time.monotonic(), self.hand_grace_ms / 1000)
         else:
             self.active_regions = sorted({self._hand_region(*p) for p in positions})
 
-        self._update_hand_presence()
-        if positions:
-            self._update_output_range(positions)
-        self._update_region_engagement()
-        self._send_orchestra_occupancy()
+        self._send_position_updates(positions)
 
         return frame, results, active_hand_indices
 
@@ -1092,6 +1131,7 @@ class OSCGestureApp:
         if enabled and self.orchestra_mode and not self.orchestra_control.enabled:
             self.orchestra_control.set_mode(True)
         self.hand_grace.seen.clear()
+        self.boundary_gate.clear()
         self._clear_piano_locks()
         self.active_regions = []
         self.hand_present = False
@@ -1189,10 +1229,11 @@ class OSCGestureApp:
         for pos in positions:
             grouped[self._hand_region(*pos)].append(pos)
 
-        self._update_orchestra_piano(positions)
         for instr in ('brass', 'strings'):
             if grouped[instr]:
                 self._update_instrument(instr, grouped[instr])
+        # Avoid the strings range actually sent, including movement throttling.
+        self._update_orchestra_piano(positions)
 
     def _update_instrument(self, instr, positions):
         """Send one instrument's range from the hand playing it.
@@ -1209,9 +1250,10 @@ class OSCGestureApp:
 
         st = self._instr_state[instr]
         now = time.time()
-        if now - st['last_time'] < self.osc_interval:
+        entering = not self._engaged[instr]
+        if not entering and now - st['last_time'] < self.osc_interval:
             return
-        if (st['last_val'] is not None and
+        if (not entering and st['last_val'] is not None and
                 abs(val - st['last_val']) <= self.change_threshold):
             return
         st['last_val']  = val
@@ -1228,35 +1270,72 @@ class OSCGestureApp:
 
     def _piano_hand_window(self, hand):
         if hand['locked']:
-            # Two octaves centred on the last piano position, clipped to MIDI.
-            return (max(_MIDI_LOW, hand['centre'] - 12),
-                    min(_MIDI_HIGH, hand['centre'] + 12))
+            low, high = hand['home_window']
+            shift = hand.get('avoidance_shift', 0)
+            return max(_MIDI_LOW, low - shift), max(_MIDI_LOW, high - shift)
         return self._window_around(hand['centre'])
+
+    def _adjust_piano_for_strings(self, hands):
+        """Recompute displacement from home, counting shared MIDI notes once.
+
+        Directly controlled piano hands take priority. Only locked windows
+        move; their displacement disappears as strings rise or leave. At the
+        MIDI floor a window may narrow to meet the overlap limit.
+        """
+        displaced = {label for label, hand in hands if hand.get('avoidance_shift', 0)}
+        for _, hand in hands:
+            hand['avoidance_shift'] = 0
+        val = self._instr_state['strings']['last_val']
+        if 'strings' not in self.active_regions or val is None:
+            return
+        low, high = self._window_around(val)
+        strings = set(range(low, high + 1))
+        fixed = set()
+        movable = []
+        home_shared = set()
+        for label, hand in hands:
+            lo, hi = self._piano_hand_window(hand)
+            notes = set(range(lo, hi + 1))
+            home_shared.update(notes & strings)
+            if hand['locked'] and (notes & strings or label in displaced):
+                movable.append(hand)
+            else:
+                fixed.update(notes & strings)
+        # An actively played piano window can itself exceed 12 shared notes;
+        # never override the player's direct control to enforce this policy.
+        limit = max(_PIANO_STRINGS_MAX_OVERLAP, len(fixed))
+        if len(home_shared) <= limit and not displaced:
+            return
+        # Put displaced windows below a common upper edge. Their shared notes
+        # then occupy one prefix of the strings window, so two piano windows
+        # cannot each consume a separate allowance of 12 notes.
+        for ceiling in range(low + _PIANO_STRINGS_MAX_OVERLAP - 1, _MIDI_LOW - 2, -1):
+            shared = set(fixed)
+            for hand in movable:
+                hand['avoidance_shift'] = max(0, hand['home_window'][1] - ceiling)
+                lo, hi = self._piano_hand_window(hand)
+                shared.update(strings.intersection(range(lo, hi + 1)))
+            if len(shared) <= limit:
+                break
 
     def _update_orchestra_piano(self, positions):
         present = set()
-        sent_centres = dict(zip((label for label, _ in (self._last_piano_layout or ())),
-                                self._last_piano_centres))
         for x, y, label in positions:
             label = label or ('Left' if x < _UNLABELLED_HAND_SPLIT else 'Right')
             present.add(label)
             if self._hand_region(x, y, label) == 'piano':
                 centre = self.map_hand_x_to_val(x, 'piano')
-                previous = self._piano_hands.get(label)
-                # Returning from an upper region must not narrow/re-send the
-                # locked window until movement exceeds the configured threshold.
-                # Keep it locked across frames (and other-hand updates) until then.
-                if (previous and previous['locked']
-                        and abs(centre - sent_centres.get(label, previous['centre']))
-                        <= self.change_threshold):
-                    continue
                 self._piano_hands[label] = {
                     'centre': centre, 'locked': False}
             elif label in self._piano_hands:
-                self._piano_hands[label]['locked'] = True
+                hand = self._piano_hands[label]
+                if not hand['locked']:
+                    hand['home_window'] = self._window_around(hand['centre'])
+                    hand['locked'] = True
         # A locked hand may disappear while the other remains active. Keep its
         # lock; only an unlocked, absent hand loses its individual window.
         retained = set(self.hand_grace.seen) if self.orchestra_control.enabled else set()
+        retained.update(getattr(self, '_boundary_retained', set()))
         self._piano_hands = {label: hand for label, hand in self._piano_hands.items()
                              if hand['locked'] or label in present or label in retained}
         hands = sorted(self._piano_hands.items())
@@ -1267,21 +1346,27 @@ class OSCGestureApp:
             return
         layout = tuple((label, hand['locked']) for label, hand in hands)
         centres = tuple(hand['centre'] for _, hand in hands)
+        self._adjust_piano_for_strings(hands)
+        spans = [self._piano_hand_window(hand) for _, hand in hands]
+        locked_spans = tuple((label, spans[i]) for i, (label, hand) in enumerate(hands)
+                             if hand['locked'])
+        avoidance_changed = locked_spans != getattr(self, '_last_locked_spans', ())
         self.left_val = centres[0]
         self.right_val = centres[1] if len(centres) > 1 else None
         now = time.time()
-        changed_layout = layout != self._last_piano_layout
+        changed_layout = (layout != self._last_piano_layout
+                          or bool(present & self.boundary_gate.entered))
         moved = any(abs(a - b) > self.change_threshold
                     for a, b in zip(centres, self._last_piano_centres))
         if self.mode == 'pause':
             return
-        if changed_layout or (moved and now - self.last_osc_time >= self.osc_interval):
-            spans = [self._piano_hand_window(hand) for _, hand in hands]
+        if changed_layout or avoidance_changed or (moved and now - self.last_osc_time >= self.osc_interval):
             args = [self._instrument_id('piano'), *spans[0],
                     *(spans[1] if len(spans) > 1 else (-1, -1))]
             self._send_range(args, 'piano')
             self._last_piano_layout = layout
             self._last_piano_centres = centres
+            self._last_locked_spans = locked_spans
             self.last_osc_time = now
             self.inactivity_message_sent = False
 
@@ -1460,6 +1545,7 @@ class OSCGestureApp:
             return
         previous, self.view = self.view, wanted
         self.hand_grace.seen.clear()
+        self.boundary_gate.clear()
         self._clear_piano_locks()
         if wanted != 'mock':
             self.orchestra_control.set_source(False)
@@ -1535,17 +1621,12 @@ class OSCGestureApp:
             return
         with self._view_lock:
             hands = self.mock_hands
-        positions = [(x, y, label) for label, (x, y) in
-                     (('Left', hands['Left']), ('Right', hands['Right']))
-                     if y <= self.active_area_ratio]
+        positions = self._gate_positions([(x, y, label) for label, (x, y) in
+                     (('Left', hands['Left']), ('Right', hands['Right']))])
 
         self.hand_present = bool(positions)
         self.active_regions = sorted({self._hand_region(*p) for p in positions})
-        self._update_hand_presence()
-        if positions:
-            self._update_output_range(positions)
-        self._update_region_engagement()
-        self._send_orchestra_occupancy()
+        self._send_position_updates(positions)
 
     def send_manual_osc(self, address, args):
         """Send one OSC message on behalf of the manual tab.

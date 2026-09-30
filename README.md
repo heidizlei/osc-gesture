@@ -132,6 +132,17 @@ an explicit opt-in, so it still shows whatever you toggle it on for.
 
 ### OSC log
 
+In orchestra mode, the red boundary has a 2% frame-height hysteresis margin.
+A fresh hand entry sends its first range for the occupied instrument immediately,
+then its activation/force messages in the same update cycle. Entry ranges bypass
+movement throttling for piano, brass, and strings. Further range updates and
+region changes wait until the hand stays at least 2% above the red line for 250 ms.
+Two boundary crossings within 600 ms classify that hand as red, preventing
+repeated activation/reset messages. A steady lift above the margin restores
+control after 250 ms. Staying clearly in red (or absent) for 600 ms restores
+immediate activation for the next fresh entry. Camera and mock input use the
+same gate; occupancy heartbeats continue every 300 ms.
+
 The bottom of the right column mirrors the `OSC →` lines the terminal prints,
 with millisecond timestamps. Each message type gets its own colour, and
 `/setOutputRange` is split further by which instrument it targets — piano,
@@ -343,11 +354,26 @@ The leading argument is the zone's **General MIDI program** — 48 string
 ensemble, 61 brass section — read from the preset entry the zone maps to, so
 pointing the app at a different preset changes the ids it sends.
 
-Each zone's range is driven by the hands currently in it, independently of the
-others. Two hands in the same zone collapse to one message at their mean x —
-which above the split only happens when MediaPipe labels both the same. The
-piano keeps its original behaviour: one hand drives both channels, two hands
-drive left and right separately.
+Each orchestral zone follows its hand's x position. Two hands in the same
+orchestral zone collapse to one message at their mean x, which normally only
+happens when MediaPipe labels both the same. Piano keeps a separate window
+for each hand. Moving a hand into brass or strings locks its last piano
+window at its existing width; it does not widen to two octaves. The locked
+window keeps that width even if the window slider changes afterward.
+
+Strings receive a **+6-semitone offset**, capped at the configured strings
+maximum (94 by default). The whole window stops at that ceiling, preserving
+its width. While strings are occupied, locked piano windows shift down when
+their combined overlap exceeds **12 distinct MIDI pitches**. As strings rise,
+piano returns toward its original lock, stopping there. The adjustment follows
+the strings range actually sent over OSC, including movement throttling.
+Overlapping piano windows count shared pitches only once.
+
+Returning a hand to the piano region immediately restores direct control.
+Directly controlled piano windows are never moved by avoidance; if one alone
+overlaps strings by more than 12 pitches, that overlap takes priority. When
+strings leave, retained piano locks return home. At MIDI zero, downward
+avoidance may narrow a window. Brass receives no offset or avoidance rule.
 
 Hand position is the **centroid of the five finger-tip landmarks** (4, 8, 12,
 16, 20). That's used for whether a hand is above the piano split, for the
@@ -360,17 +386,19 @@ Each zone maps `x` over its own slice of the frame, set in `_REGION_SPAN`:
 |---|---|---|---|
 | Piano | the whole width | low note | high note |
 | Brass | the **left 75%** | low note | past the high note |
-| Strings | the **right 75%** | below the low note | high note |
+| Strings | the **right 75%**, then +6 semitones | below the low note | capped at high note |
 
 So each instrument's range sits under the side its hand naturally plays from,
 and the two only overlap across the middle. Past its own 75% a zone keeps the
 same semitones-per-pixel slope instead of dead-ending, so the leftover quarter
 carries on past the end of the range — brass reaches above its high note on
 the right of the frame, strings below its low note on the left, and both hands
-still reach everything from wherever they are. Valid MIDI is the only hard
-stop. With the default ranges and a 16-semitone window, brass runs 36–92
+still reach pitches outside their configured lower bounds. Brass stops only
+at valid MIDI limits; strings also stop at their configured upper note.
+With the default ranges and a 16-semitone window, brass runs 36–92
 across the left three quarters and on up to ~105 at the right edge; strings
-runs 33–94 across the right three quarters and down to ~18 at the left.
+start at 39–55 at x = 25%, reach 78–94 near x = 90%, and remain there to
+the right edge. At the left edge strings reach 24–40.
 
 ### Forced instruments
 
