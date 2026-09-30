@@ -1019,6 +1019,25 @@ class OSCGestureApp:
         self._last_frame_time = now
 
     def _step(self):
+        output = self._step_input()
+        sender = getattr(self, 'midi_state_sender', None)
+        if sender is not None:
+            frame, results, _ = output
+            positions = []
+            if self.orchestra_control.gesture_enabled:
+                if self.view == 'mock':
+                    with self._view_lock:
+                        positions = [(x, y, label) for label, (x, y) in self.mock_hands.items()]
+                elif frame is not None and results is not None:
+                    positions = [self._hand_position(hand) + (self._handedness(results, index),)
+                                 for index, hand in enumerate(results.hand_landmarks or [])]
+                elif self.view == 'gesture' and self.hand_tracker.camera_url and not self.hand_tracker.cap.stale:
+                    return output
+            sender.update(positions, self._orchestra_split_y(), self.active_area_ratio,
+                          self._hand_region)
+        return output
+
+    def _step_input(self):
         """Run one capture -> track -> detect -> send cycle.
 
         Draws nothing, so both the OpenCV window and the web UI can drive it.
@@ -1895,9 +1914,14 @@ class OSCGestureApp:
 
     def run(self, ui="web", http_host="127.0.0.1", http_port=8765,
             open_browser=True):
-        if ui == "web":
-            return self._run_web(http_host, http_port, open_browser)
-        return self._run_cv2()
+        try:
+            if ui == "web":
+                return self._run_web(http_host, http_port, open_browser)
+            return self._run_cv2()
+        finally:
+            sender = getattr(self, 'midi_state_sender', None)
+            if sender is not None:
+                sender.close()
 
     def _run_cv2(self):
         print("Running OSC Gesture App (OpenCV window).")

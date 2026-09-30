@@ -27,6 +27,10 @@ if __name__ == "__main__":
                         help="web UI port")
     parser.add_argument("--no-browser", action="store_true",
                         help="do not open a browser window on startup")
+    parser.add_argument("--midi-state-host", help="enable stage snapshots to this proxy host")
+    parser.add_argument("--midi-state-port", default=4200, type=int)
+    parser.add_argument("--midi-state-group", default=1, type=int, choices=range(1, 17))
+    parser.add_argument("--midi-state-stream", default=0, type=int, choices=range(256))
     parser.add_argument("--orchestra-preset", default=None,
                         help="orchestra preset JSON to read instrument ids "
                              "from (its outputInstruments ids); defaults to "
@@ -34,6 +38,9 @@ if __name__ == "__main__":
                              "values. Playing ranges are not read from it — "
                              "those are set in the UI")
     args = parser.parse_args()
+
+    if not 1 <= args.midi_state_port <= 65535:
+        parser.error("--midi-state-port must be 1..65535")
 
     if args.camera_url:
         from urllib.parse import urlparse
@@ -44,6 +51,10 @@ if __name__ == "__main__":
     app = OSCGestureApp(ip=args.host, port=args.port,
                         camera_url=args.camera_url,
                         orchestra_preset=args.orchestra_preset)
+    if args.midi_state_host:
+        from classes.midi_state_sender import MidiStateSender
+        app.midi_state_sender = MidiStateSender(args.midi_state_host, args.midi_state_port,
+                                                args.midi_state_group, args.midi_state_stream)
     if args.ui == "web" and getattr(sys, "frozen", False) and sys.platform == "darwin":
         # The .app needs a native event loop to be quittable from the Dock;
         # see classes/mac_app.py.
