@@ -273,7 +273,8 @@ class OSCGestureApp:
                              '/adjustTempo', '/setTempo', '/resetControl', '/setOrchestraOccupancy'}
         self.osc_log.should_send = lambda address: (self.orchestra_control.gesture_enabled
                                                    or address not in gesture_addresses)
-        self._gesture_control_seen = True
+        # Apply the initial gesture/orchestra preference on the first frame too.
+        self._gesture_control_seen = None
         self.hand_grace = HandGrace()
         self.boundary_gate = BoundaryGate()
         self.hand_grace_ms = 150
