@@ -293,6 +293,22 @@ class PianoHandLockTests(unittest.TestCase):
         self.assertEqual(self.piano_messages()[-1][:3], [1, 42, 54])
         self.assertEqual(self.piano_messages()[-1][4] - self.piano_messages()[-1][3], 8)
 
+    def test_each_instrument_has_its_own_window(self):
+        self.app._set_range_window(4, 'brass')
+        self.app._set_range_window(20, 'strings')
+        self.frame((.5, .2, 'Left'), (.75, .5, 'Right'))
+        sent = [call.args[1] for call in self.app.osc_client.send_message.call_args_list
+                if call.args[0] == '/setOutputRange']
+        brass = [args for args in sent if args[0] == 61][-1]
+        self.assertEqual(brass[2] - brass[1], 4)
+        self.assertEqual(self.piano_messages()[-1][2] - self.piano_messages()[-1][1], 12)
+        self.frame((.5, .2, 'Right'))
+        sent = [call.args[1] for call in self.app.osc_client.send_message.call_args_list
+                if call.args[0] == '/setOutputRange' and call.args[1][0] == 48]
+        self.assertEqual(sent[-1][2] - sent[-1][1], 20)
+        self.assertEqual(self.app.range_windows,
+                         {'piano': 12, 'brass': 4, 'strings': 20})
+
     def test_failed_camera_frame_clears_locks_after_grace(self):
         a = self.app
         self.frame((.25, .5, 'Left'))

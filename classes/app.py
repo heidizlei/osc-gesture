@@ -228,7 +228,9 @@ class _OSCLog:
 
 _WINDOW_NAME = "Hand Camera"
 _BOUNDARY_TRACKBAR = "Active area %"
-_WINDOW_TRACKBAR = "Range window st"
+# One range-window trackbar per instrument, in the range bars' row order.
+_WINDOW_TRACKBARS = {region: f"{region.capitalize()} window st"
+                     for region in _RANGE_BAR_ORDER}
 
 
 class OSCGestureApp:
@@ -257,9 +259,9 @@ class OSCGestureApp:
                  preset="range",
                  orchestra_preset=None,
                  camera_url=None):
-        # Output window around the mapped pitch, as (low, high) offsets. Its
-        # width is what the range-window slider sets.
-        self.interval = (-8, 8)
+        # Output window around each region's mapped pitch, as (low, high)
+        # offsets. Each width is what that instrument's window slider sets.
+        self.intervals = {region: (-8, 8) for region in _RANGE_BAR_ORDER}
 
         # OSC client, wrapped so the web UI can show the same feed the
         # terminal prints. Both names point at the wrapper; osc_log stays
@@ -474,9 +476,19 @@ class OSCGestureApp:
         self._update_region_engagement()
         self._send_orchestra_occupancy()
 
-    def _window_around(self, val):
+    @property
+    def interval(self):
+        """The piano's window offsets; the piano's L/R readout uses these."""
+        return self.intervals['piano']
+
+    @interval.setter
+    def interval(self, offsets):
+        """Set every region's window offsets at once."""
+        self.intervals = {region: tuple(offsets) for region in _RANGE_BAR_ORDER}
+
+    def _window_around(self, val, region='piano'):
         """(low, high) output window around one mapped pitch, valid MIDI."""
-        lo, hi = self.interval
+        lo, hi = self.intervals[region]
         return (max(_MIDI_LOW, val + lo), min(_MIDI_HIGH, val + hi))
 
     def _centre_bounds(self, region):
@@ -489,7 +501,7 @@ class OSCGestureApp:
         collapses to its midpoint.
         """
         low, high = self.instr_ranges[region]
-        lo_off, hi_off = self.interval
+        lo_off, hi_off = self.intervals[region]
         c_low, c_high = low - lo_off, high - hi_off
         if c_low > c_high:
             mid = (low + high) // 2
@@ -497,22 +509,34 @@ class OSCGestureApp:
         return (c_low, c_high)
 
     @property
-    def range_window(self):
-        """Width of the output window in semitones."""
-        return self.interval[1] - self.interval[0]
+    def range_windows(self):
+        """Width of each region's output window in semitones."""
+        return {region: hi - lo for region, (lo, hi) in self.intervals.items()}
 
-    def _set_range_window(self, semitones):
-        """Resize the output window, keeping it centred on the mapped pitch.
+    @property
+    def range_window(self):
+        """Width of the piano's output window in semitones."""
+        return self.range_windows['piano']
+
+    def _set_range_window(self, semitones, region=None):
+        """Resize one region's output window (every region's when None),
+        keeping it centred on the mapped pitch.
 
         An odd width can't split evenly, and the extra semitone goes above.
         """
+        if region is not None and region not in self.intervals:
+            raise ValueError(f"unknown instrument: {region!r}")
         size = int(np.clip(int(semitones), 1, _MAX_RANGE_WINDOW))
-        if size == self.range_window:
+        offsets = (-(size // 2), size - size // 2)
+        changed = [r for r in ([region] if region else self.intervals)
+                   if self.intervals[r] != offsets]
+        if not changed:
             return
-        self.interval = (-(size // 2), size - size // 2)
+        for r in changed:
+            self.intervals[r] = offsets
         # Every live range is now stale by the amount the window changed.
         self._reset_range_throttle()
-        print(f"Range window: {size} semitones {self.interval}")
+        print(f"Range window {'/'.join(changed)}: {size} semitones {offsets}")
 
     @property
     def gestures_used(self):
@@ -663,10 +687,12 @@ class OSCGestureApp:
                           round(self.active_area_ratio * 100), 95,
                           self._handle_boundary_slider)
         cv2.setTrackbarMin(_BOUNDARY_TRACKBAR, _WINDOW_NAME, 10)
-        cv2.createTrackbar(_WINDOW_TRACKBAR, _WINDOW_NAME,
-                           self.range_window, _MAX_RANGE_WINDOW,
-                           self._set_range_window)
-        cv2.setTrackbarMin(_WINDOW_TRACKBAR, _WINDOW_NAME, 1)
+        for region, trackbar in _WINDOW_TRACKBARS.items():
+            cv2.createTrackbar(trackbar, _WINDOW_NAME,
+                               self.range_windows[region], _MAX_RANGE_WINDOW,
+                               lambda size, region=region:
+                                   self._set_range_window(size, region))
+            cv2.setTrackbarMin(trackbar, _WINDOW_NAME, 1)
         self._boundary_trackbar_ready = True
 
     def _handle_mouse(self, event, x, y, flags, param):
@@ -983,7 +1009,8 @@ class OSCGestureApp:
         if region == 'strings':
             # Raise strings by a tritone, stopping the whole window at the
             # configured upper note rather than narrowing it at the ceiling.
-            val = min(val + _STRINGS_OFFSET, self.instr_ranges[region][1] - self.interval[1])
+            val = min(val + _STRINGS_OFFSET,
+                      self.instr_ranges[region][1] - self.intervals[region][1])
         return int(round(max(_MIDI_LOW, min(_MIDI_HIGH, val))))
 
 
@@ -1278,7 +1305,7 @@ class OSCGestureApp:
             return
         st['last_val']  = val
         st['last_time'] = now
-        self.send_instrument_range(instr, *self._window_around(val))
+        self.send_instrument_range(instr, *self._window_around(val, instr))
 
     def _clear_piano_locks(self):
         if self._piano_hands:
@@ -1308,7 +1335,7 @@ class OSCGestureApp:
         val = self._instr_state['strings']['last_val']
         if 'strings' not in self.active_regions or val is None:
             return
-        low, high = self._window_around(val)
+        low, high = self._window_around(val, 'strings')
         strings = set(range(low, high + 1))
         fixed = set()
         movable = []
@@ -1469,7 +1496,7 @@ class OSCGestureApp:
                 return [max(_MIDI_LOW, min(pitches) // 12 * 12),
                         min(_MIDI_HIGH, -(-max(pitches) // 12) * 12)]
         for region in self._displayed_regions():
-            reach = [self._window_around(self.map_hand_x_to_val(x, region))
+            reach = [self._window_around(self.map_hand_x_to_val(x, region), region)
                      for x in (0.0, 1.0)]
             lo = min(lo, self.instr_ranges[region][0], *(r[0] for r in reach))
             hi = max(hi, self.instr_ranges[region][1], *(r[1] for r in reach))
@@ -1514,7 +1541,7 @@ class OSCGestureApp:
             elif live:
                 val = self._instr_state[region]['last_val']
                 if val is not None:
-                    spans = [list(self._window_around(val))]
+                    spans = [list(self._window_around(val, region))]
             low, high = self.instr_ranges[region]
             if not spans:
                 # Never sounded, or reset on the way out: it's parked on its
@@ -1718,6 +1745,7 @@ class OSCGestureApp:
             'right_val':      self.right_val,
             'interval':       list(self.interval),
             'range_window':   self.range_window,
+            'range_windows':  self.range_windows,
             'range_window_max': _MAX_RANGE_WINDOW,
             'pitch_bounds':   self._pitch_bounds(),
             'range_limits':   [_MIDI_LOW, _MIDI_HIGH],
@@ -1782,7 +1810,14 @@ class OSCGestureApp:
         if 'active_area' in payload:
             self._set_active_area_ratio(float(payload['active_area']))
         if 'range_window' in payload:
-            self._set_range_window(payload['range_window'])
+            spec = payload['range_window']
+            # A bare number resizes every instrument; an object resizes the
+            # ones it names, e.g. {"brass": 12}.
+            if isinstance(spec, dict):
+                for region, size in spec.items():
+                    self._set_range_window(size, region)
+            else:
+                self._set_range_window(spec)
         if 'instr_range' in payload:
             spec = payload['instr_range']
             if not isinstance(spec, dict):

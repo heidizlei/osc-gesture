@@ -87,13 +87,17 @@ numbers are MIDI note numbers, one per octave). Each bar takes its
 instrument's colour from the OSC log, so a bar and the messages that moved it
 read as the same thing.
 
-The **window** slider above the bars sets how wide each instrument's output
-range is, from 1 semitone to 3 octaves (36), starting at 16 — the width the
-app has always used. The window stays centred on the pitch the hand maps to;
+Three **window** sliders above the bars — **piano**, **strings** and
+**brass**, each tinted in its instrument's colour — set how wide that
+instrument's output range is, from 1 semitone to 3 octaves (36), each
+starting at 16 — the width the app has always used. Each slider only changes
+its own instrument. The window stays centred on the pitch the hand maps to;
 an odd width puts the extra semitone above. Every range is clamped to valid
 MIDI, so a wide window near either end of the mapping flattens against 0 or
-127 rather than running past it. The OpenCV window has the same control as a
-**Range window st** trackbar.
+127 rather than running past it. The OpenCV window has the same controls as
+**Piano / Brass / Strings window st** trackbars. Over HTTP, `range_window`
+takes either a number (every instrument) or an object such as
+`{"brass": 12}`.
 
 Beside each bar sit that instrument's **lowest and highest note**, as MIDI
 numbers. They are the range the instrument plays, and editing one re-maps
