@@ -60,7 +60,7 @@ def encode_snapshot(hands, split, cutoff, sequence, now, group=1, view=False):
 
 
 class MidiStateSender:
-    def __init__(self, host, port=4200, group=2, stream=0, view_port=None):
+    def __init__(self, host, port=4200, group=2, stream=1, view_port=None):
         if not 1 <= group <= 16 or not 0 <= stream <= 255 or not 1 <= port <= 65535:
             raise ValueError('Invalid MIDI State port, group, or stream')
         if view_port is not None and not 1 <= view_port <= 65535:

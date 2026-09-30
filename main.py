@@ -30,7 +30,8 @@ if __name__ == "__main__":
     parser.add_argument("--midi-state-host", help="enable stage snapshots to this proxy host")
     parser.add_argument("--midi-state-port", default=4200, type=int)
     parser.add_argument("--midi-state-group", default=2, type=int, choices=range(1, 17))
-    parser.add_argument("--midi-state-stream", default=0, type=int, choices=range(256))
+    parser.add_argument("--midi-state-stream", default=1, type=int, choices=range(256),
+                        help="stream 1 keeps gestures off the score's stream 0 on the same Group")
     parser.add_argument("--midi-state-view-port", type=int,
                         help="listen here for OSC /showGestureView 1|0 to switch the stage view")
     parser.add_argument("--orchestra-preset", default=None,
