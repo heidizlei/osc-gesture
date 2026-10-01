@@ -1,0 +1,36 @@
+{
+  "preset": "range",
+  "view": "gesture",
+  "active_area": 0.75,
+  "orchestra": true,
+  "piano_only": true,
+  "orchestra_split_ratio": 0.5,
+  "draw_landmarks": false,
+  "debug": false,
+  "hand_confidence": {
+    "detection": 0.78,
+    "presence": 0.5,
+    "tracking": 0.5
+  },
+  "hand_grace_ms": 150,
+  "range_window": {
+    "piano": 24,
+    "piano_orchestra": 16,
+    "brass": 16,
+    "strings": 16
+  },
+  "instr_range": {
+    "piano": [
+      26,
+      89
+    ],
+    "strings": [
+      33,
+      94
+    ],
+    "brass": [
+      36,
+      92
+    ]
+  }
+}
