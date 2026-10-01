@@ -76,6 +76,9 @@ if [[ -e .venv ]]; then
 else
     "$python_bin" -m venv .venv
 fi
+if ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
+    .venv/bin/python -m ensurepip --upgrade
+fi
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m pip check
