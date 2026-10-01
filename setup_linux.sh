@@ -53,8 +53,17 @@ if (( ! skip_system )); then
         elevate=(sudo)
     fi
     python_version="$("$python_bin" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+    venv_package="python${python_version}-venv"
+    venv_packages=()
+    if ! "$python_bin" -m venv --help >/dev/null 2>&1; then
+        if ! apt-cache show "$venv_package" >/dev/null 2>&1; then
+            echo "${python_bin} does not provide venv, and ${venv_package} is unavailable from apt." >&2
+            exit 1
+        fi
+        venv_packages=("$venv_package")
+    fi
     "${elevate[@]}" apt-get update
-    "${elevate[@]}" apt-get install -y "python${python_version}-venv" libgl1 libglib2.0-0 libegl1
+    "${elevate[@]}" apt-get install -y "${venv_packages[@]}" libgl1 libglib2.0-0 libegl1
 fi
 
 cd "$project_dir"
