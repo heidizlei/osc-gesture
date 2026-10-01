@@ -905,6 +905,8 @@ const MODE_COLORS = {
 };
 
 const PRESET_KEYS = ["1", "2", "3", "4", "5"];
+// Presets kept in the app but not offered in the UI for now (button and key).
+const HIDDEN_PRESETS = new Set(["rc", "tempo"]);
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
@@ -1006,6 +1008,7 @@ function buildPresets(names) {
   const wrap = $("presets");
   wrap.innerHTML = "";
   names.forEach((name, i) => {
+    if (HIDDEN_PRESETS.has(name)) return;
     const b = document.createElement("button");
     b.type = "button";
     b.dataset.preset = name;
@@ -1351,7 +1354,7 @@ document.addEventListener("keydown", (e) => {
   if (e.target instanceof HTMLInputElement) return;
   if (activeTab !== "gesture") return;   // these all drive the gesture loop
   const i = PRESET_KEYS.indexOf(e.key);
-  if (i >= 0 && state && state.presets[i]) {
+  if (i >= 0 && state && state.presets[i] && !HIDDEN_PRESETS.has(state.presets[i])) {
     send({ preset: state.presets[i] });
   } else if (e.key === "l" || e.key === "L") {
     send({ draw_landmarks: !state?.draw_landmarks });
