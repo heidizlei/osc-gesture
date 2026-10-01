@@ -1,3 +1,4 @@
+import math
 import time
 import os
 import sys
@@ -299,6 +300,9 @@ class OSCGestureApp:
         self.hand_grace = HandGrace()
         self.boundary_gate = BoundaryGate()
         self.hand_grace_ms = 150
+        # Palm length, as a fraction of frame height, below which a hand is
+        # ignored -- e.g. someone standing behind the performer.
+        self.min_hand_size = 0.0
         self._pedal_mode_seen = False
 
         # Hand tracking
@@ -1130,7 +1134,8 @@ class OSCGestureApp:
             return None, None, []
 
         frame, results = self.hand_tracker.get_frame_and_landmarks(
-            active_area_ratio=self.active_area_ratio)
+            active_area_ratio=self.active_area_ratio,
+            min_hand_size=self.min_hand_size)
         if frame is None:
             if self.hand_tracker.camera_url:
                 if not self.hand_tracker.cap.stale:
@@ -1796,6 +1801,7 @@ class OSCGestureApp:
             'gesture_view':     (self.midi_state_sender.view
                                  if getattr(self, 'midi_state_sender', None) else None),
             'hand_grace_ms':    self.hand_grace_ms,
+            'min_hand_size':    self.min_hand_size,
             'orchestra_split':  round(self._orchestra_split_y(), 4),
             'active_regions':   list(self.active_regions),
         }
@@ -1831,6 +1837,7 @@ class OSCGestureApp:
             'debug':           self.debug_mode,
             'hand_confidence': self.hand_tracker.confidence_state()['values'],
             'hand_grace_ms':   self.hand_grace_ms,
+            'min_hand_size':   self.min_hand_size,
             'range_window':    self.range_windows,
             'instr_range':     {r: list(b) for r, b in self.instr_ranges.items()},
         }
@@ -1888,6 +1895,11 @@ class OSCGestureApp:
             self.orchestra_control.set_mode(bool(payload['orchestra_pedal_mode']))
         if 'hand_grace_ms' in payload:
             self.hand_grace_ms = max(0, min(1000, int(payload['hand_grace_ms'])))
+        if 'min_hand_size' in payload:
+            size = float(payload['min_hand_size'])
+            if not math.isfinite(size):
+                raise ValueError('min_hand_size must be a number')
+            self.min_hand_size = max(0.0, min(0.5, size))
         if 'simulated_pedal' in payload:
             if self.view_requested() != 'mock' and payload['simulated_pedal']:
                 raise ValueError('Pedal simulation belongs to the Orchestra tab')

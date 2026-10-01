@@ -11,6 +11,47 @@ from .mjpeg_capture import MJPEGCapture
 from mediapipe.framework.formats import landmark_pb2
 from mediapipe.python.solutions import drawing_utils as mp_drawing
 
+# MediaPipe fills its hand slots first come, first served, so a small hand in
+# the background can take one of two slots from a performer's hand. Asking for
+# a few extra candidates and keeping the two largest leaves the performer's.
+_CANDIDATE_HANDS = 4
+_MAX_HANDS = 2
+
+
+def _palm_size(hand, width, height):
+    """Palm length as a fraction of frame height.
+
+    The larger of wrist-to-middle-knuckle and index-to-pinky-knuckle, measured
+    in pixels so a wide frame doesn't stretch x, and so that tilting the hand
+    along either axis only shrinks one of the two.
+    """
+    def span(a, b):
+        return math.hypot((hand[a].x - hand[b].x) * width,
+                          (hand[a].y - hand[b].y) * height)
+    return max(span(0, 9), span(5, 17)) / height
+
+
+def keep_hands(results, width, height, min_size=0.0):
+    """Drop hands with a palm under min_size and keep at most the two largest.
+
+    Kept hands stay in MediaPipe's order, so which hand is index 0 doesn't
+    flip between frames just because their sizes cross.
+    """
+    hands = getattr(results, 'hand_landmarks', None) or []
+    sizes = [_palm_size(hand, width, height) for hand in hands]
+    candidates = [i for i, size in enumerate(sizes) if size >= min_size]
+    keep = sorted(sorted(candidates, key=lambda i: -sizes[i])[:_MAX_HANDS])
+    if len(keep) == len(hands):
+        return results
+
+    def pick(field):
+        values = getattr(results, field, None) or []
+        return [values[i] for i in keep if i < len(values)]
+    return type(results)(handedness=pick('handedness'),
+                         hand_landmarks=pick('hand_landmarks'),
+                         hand_world_landmarks=pick('hand_world_landmarks'))
+
+
 # How far to probe for capture devices.
 _MAX_CAMERA_INDEX = 8
 
@@ -124,7 +165,7 @@ class HandTracker:
         options = HandLandmarkerOptions(
             base_options=base_opts,
             running_mode=VisionRunningMode.VIDEO,
-            num_hands=2,
+            num_hands=_CANDIDATE_HANDS,
             # Require stronger hand evidence to reduce head/background detections.
             min_hand_detection_confidence=confidence["detection"],
             min_hand_presence_confidence=confidence["presence"],
@@ -269,7 +310,7 @@ class HandTracker:
         self.camera_error = None
         print("Camera:", index)
 
-    def get_frame_and_landmarks(self, active_area_ratio=1.0):
+    def get_frame_and_landmarks(self, active_area_ratio=1.0, min_hand_size=0.0):
         self._apply_pending_camera()
         self._apply_pending_confidence()
         if not self.cap.isOpened() and not self._reopen_camera():
@@ -294,7 +335,7 @@ class HandTracker:
 
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=self._rgb)
         results = self.landmarker.detect_for_video(mp_image, self._next_timestamp())
-        return frame, results
+        return frame, keep_hands(results, w, h, min_hand_size)
 
     def close(self):
         self.cap.release()

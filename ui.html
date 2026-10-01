@@ -689,6 +689,11 @@
         <input type="range" id="confidence-tracking" min="0" max="100" step="1" value="80">
         <span id="confidence-tracking-value">80%</span>
       </div>
+      <div class="rw-row">
+        <label for="minHandSize" title="Ignore hands whose palm is shorter than this share of the frame height, such as people in the background. At most the two largest hands are tracked.">Min hand size</label>
+        <input type="range" id="minHandSize" min="0" max="30" step="1" value="0">
+        <span id="minHandSizeValue">off</span>
+      </div>
       <p class="hint" id="confidenceStatus" role="status"></p>
     </div>
   </section>
@@ -1083,7 +1088,19 @@ for (const key of confidenceKeys) {
   });
 }
 
+function showMinHandSize(pct) {
+  $("minHandSizeValue").textContent = pct > 0 ? pct + "%" : "off";
+}
+$("minHandSize").addEventListener("input", e => showMinHandSize(Number(e.target.value)));
+$("minHandSize").addEventListener("change", e =>
+  send({ min_hand_size: Number(e.target.value) / 100 }));
+
 function syncConfidence(s) {
+  const minSize = $("minHandSize");
+  if (minSize !== document.activeElement && s.min_hand_size != null) {
+    minSize.value = Math.round(s.min_hand_size * 100);
+    showMinHandSize(Number(minSize.value));
+  }
   const confidence = s.hand_confidence;
   if (!confidence) return;
   for (const key of confidenceKeys) {

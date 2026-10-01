@@ -25,6 +25,7 @@ class PianoHandLockTests(unittest.TestCase):
         a.orchestra_mode = True
         a.orchestra_split_ratio = .5
         a.active_area_ratio = .75
+        a.min_hand_size = 0.0
         a.orchestra_control = SimpleNamespace(enabled=True, gesture_enabled=True,
                                              status={}, set_occupancy=Mock())
         a.hand_grace = HandGrace()

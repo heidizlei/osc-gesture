@@ -43,6 +43,7 @@ class SettingsTests(unittest.TestCase):
         app = make_app(self.path)
         app.apply_control({'preset': 'tempo', 'active_area': .6, 'piano_only': False,
                            'hand_grace_ms': 300, 'draw_landmarks': True,
+                           'min_hand_size': .12,
                            'range_window': {'brass': 10},
                            'instr_range': {'strings': [40, 80]}})
         app.orchestra_split_ratio = .3
@@ -53,6 +54,7 @@ class SettingsTests(unittest.TestCase):
         self.assertAlmostEqual(restored.active_area_ratio, .6)
         self.assertFalse(restored.piano_only)
         self.assertEqual(restored.hand_grace_ms, 300)
+        self.assertAlmostEqual(restored.min_hand_size, .12)
         self.assertTrue(restored.draw_landmarks)
         self.assertEqual(restored.range_windows['brass'], 10)
         self.assertEqual(restored.instr_ranges['strings'], [40, 80])
