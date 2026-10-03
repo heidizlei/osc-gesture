@@ -181,8 +181,10 @@ class GestureSender:
 
     def _send(self, osc_client, address, args):
         try:
-            osc_client.send_message(address, args)
-            arg_str = '  ' + '  '.join(str(a) for a in args) if args else ''
-            print(f"OSC → {address}{arg_str}")
+            # Falsy when the send was gated, so a suppressed message is not
+            # announced as though it went out.
+            if osc_client.send_message(address, args) is not False:
+                arg_str = '  ' + '  '.join(str(a) for a in args) if args else ''
+                print(f"OSC → {address}{arg_str}")
         except Exception as e:
             print(f"OSC error {address}: {e}")

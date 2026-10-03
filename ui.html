@@ -273,7 +273,7 @@
     color: #666;
     font-variant-numeric: tabular-nums;
   }
-  #oscClear {
+  #oscClear, #oscSend {
     font: inherit;
     font-size: 0.7rem;
     color: var(--dim);
@@ -284,6 +284,16 @@
     cursor: pointer;
   }
   #oscClear:hover { color: var(--text); border-color: #666; }
+  /* Stopped has to be readable across a dark stage at a glance, so it is the
+     loud state; sending is the quiet one you stop noticing. */
+  #oscSend[aria-pressed="true"] { color: #7ddc9a; border-color: #2f6b45; }
+  #oscSend[aria-pressed="false"] {
+    color: #fff;
+    background: #a32b2b;
+    border-color: #d04545;
+    font-weight: 700;
+  }
+  #oscSend:hover { border-color: #888; }
   #oscLog {
     /* flex-basis 0 + min-height 0 keeps the box from being grown by its own
        content; its height is set from the stage height in JS. */
@@ -804,6 +814,8 @@
     <div class="log-head" id="logHead">
       <h2>OSC sent</h2>
       <span id="oscCount"></span>
+      <button type="button" id="oscSend" aria-pressed="true"
+              title="stop or resume all OSC output">sending</button>
       <button type="button" id="oscClear">clear</button>
     </div>
     <div id="oscLog"><span id="oscEmpty">waiting for messages…</span></div>
@@ -1110,6 +1122,27 @@ function syncLogHeight() {
 if (window.ResizeObserver) new ResizeObserver(syncLogHeight).observe(stage);
 window.addEventListener("resize", syncLogHeight);
 $("cam").addEventListener("load", syncLogHeight);
+
+// Master mute. The button holds the requested state until the app agrees, so
+// a poll landing mid-flight cannot flip it back under the pointer.
+let oscSendPending = null;
+
+function renderOscSending(on) {
+  const b = $("oscSend");
+  b.setAttribute("aria-pressed", String(on));
+  b.textContent = on ? "sending" : "STOPPED";
+}
+
+$("oscSend").addEventListener("click", async () => {
+  const next = $("oscSend").getAttribute("aria-pressed") !== "true";
+  oscSendPending = next;
+  renderOscSending(next);
+  try {
+    await send({ osc_sending: next });
+  } finally {
+    oscSendPending = null;
+  }
+});
 
 $("oscClear").addEventListener("click", async () => {
   await send({ clear_osc: true });
@@ -1637,6 +1670,8 @@ function apply(s, opts = {}) {
   }
 
   renderGeometry();
+
+  if (oscSendPending === null) renderOscSending(s.osc_sending !== false);
 
   // The range and pedal-only presets ignore gestures, so their readout would
   // be showing numbers nothing acts on.

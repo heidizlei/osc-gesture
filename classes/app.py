@@ -198,14 +198,17 @@ class _OSCLog:
         self._seq     = 0
 
     def send_message(self, address, value):
+        """Send unless gated. Returns whether it actually reached the wire, so
+        callers do not announce a message that was suppressed."""
         if not self.should_send(address):
-            return
+            return False
         try:
             self._client.send_message(address, value)
         except Exception as e:
             self._record(address, value, error=str(e))
             raise
         self._record(address, value)
+        return True
 
     def _record(self, address, value, error=None):
         if isinstance(value, (list, tuple)):
@@ -293,8 +296,11 @@ class OSCGestureApp:
         gesture_addresses = {'/setOutputRange', '/setActiveInstruments', '/setForcedInstruments',
                              '/setCameraPause', '/setManualPause', '/playRuns', '/playChords',
                              '/adjustTempo', '/setTempo', '/resetControl', '/setOrchestraOccupancy'}
-        self.osc_log.should_send = lambda address: (self.orchestra_control.gesture_enabled
-                                                   or address not in gesture_addresses)
+        # Master mute for the wire, on top of the per-preset gesture gate.
+        self.osc_sending = True
+        self.osc_log.should_send = lambda address: (
+            self.osc_sending and (self.orchestra_control.gesture_enabled
+                                  or address not in gesture_addresses))
         # Apply the initial gesture/orchestra preference on the first frame too.
         self._gesture_control_seen = None
         self.hand_grace = HandGrace()
@@ -916,16 +922,16 @@ class OSCGestureApp:
             args = [arg1, arg2, arg3, arg4]
             if self.orchestra_mode or self.orchestra_control.enabled:
                 args.insert(0, self._instrument_id('piano'))
-            self.osc_client.send_message("/setOutputRange", args)
-            print(f"OSC → /setOutputRange {arg1} {arg2} {arg3} {arg4}")
+            if self.osc_client.send_message("/setOutputRange", args):
+                print(f"OSC → /setOutputRange {arg1} {arg2} {arg3} {arg4}")
         except Exception as e:
             print("OSC send error:", e)
 
     def _send_range(self, args, label):
         try:
-            self.osc_client.send_message("/setOutputRange", args)
-            print("OSC → /setOutputRange " +
-                  " ".join(str(a) for a in args) + f"  ({label})")
+            if self.osc_client.send_message("/setOutputRange", args):
+                print("OSC → /setOutputRange " +
+                      " ".join(str(a) for a in args) + f"  ({label})")
         except Exception as e:
             print("OSC send error:", e)
 
@@ -1010,9 +1016,9 @@ class OSCGestureApp:
 
     def _send_id_list(self, address, ids):
         try:
-            self.osc_client.send_message(address, ids)
-            print(f"OSC → {address} " +
-                  (" ".join(str(i) for i in ids) if ids else "(empty)"))
+            if self.osc_client.send_message(address, ids):
+                print(f"OSC → {address} " +
+                      (" ".join(str(i) for i in ids) if ids else "(empty)"))
         except Exception as e:
             print("OSC send error:", e)
 
@@ -1023,8 +1029,8 @@ class OSCGestureApp:
             # Tagged companion lets an updated receiver distinguish camera pause
             # ownership. Older receivers continue using /setManualPause.
             address = '/setCameraPause' if self.orchestra_control.status else '/setManualPause'
-            self.osc_client.send_message(address, pause_flag)
-            print(f"OSC → {address} {pause_flag}")
+            if self.osc_client.send_message(address, pause_flag):
+                print(f"OSC → {address} {pause_flag}")
         except Exception as e:
             print("Pause OSC error:", e)
 
@@ -1734,6 +1740,23 @@ class OSCGestureApp:
         self.active_regions = sorted({self._hand_region(*p) for p in positions})
         self._send_position_updates(positions)
 
+    def _set_osc_sending(self, on):
+        """Master mute for everything this app puts on the wire.
+
+        Resuming forgets the last sent values: the receiver missed whatever
+        moved while muted, and a value that has not changed much since would
+        be throttled away and leave it stale until the hands happened to move
+        far enough. Nothing is logged while muted either, so a silent log is
+        the signal that the wire really is quiet.
+        """
+        on = bool(on)
+        if on == self.osc_sending:
+            return
+        self.osc_sending = on
+        if on:
+            self._reset_range_throttle()
+        print("OSC sending:", on)
+
     def set_manual_hands(self, hands):
         """Place or clear stand-in hands, as {'Left': [x, y], 'Right': None}.
 
@@ -1885,6 +1908,7 @@ class OSCGestureApp:
             'hands':          hands,
             'osc':            osc_entries,
             'osc_seq':        osc_seq,
+            'osc_sending':    self.osc_sending,
             'camera':           self.hand_tracker.camera_index,
             'camera_error':     self.hand_tracker.camera_error,
             'hand_confidence':  self.hand_tracker.confidence_state(),
@@ -2068,6 +2092,8 @@ class OSCGestureApp:
                 self.save_settings()
             except OSError as e:
                 raise ValueError(f"could not save settings: {e}")
+        if 'osc_sending' in payload:
+            self._set_osc_sending(payload['osc_sending'])
         if payload.get('clear_osc'):
             self.osc_log.clear()
         if payload.get('quit'):
