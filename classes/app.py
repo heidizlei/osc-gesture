@@ -2011,7 +2011,7 @@ class OSCGestureApp:
         if 'gesture_view' in payload:
             sender = getattr(self, 'midi_state_sender', None)
             if sender is None:
-                raise ValueError('Start with --midi-state-host to switch the stage view')
+                raise ValueError('MIDI State is off (--no-midi-state): the stage view cannot be switched')
             sender.set_view(bool(payload['gesture_view']))
         if 'orchestra_pedal_mode' in payload:
             if payload['orchestra_pedal_mode']:
