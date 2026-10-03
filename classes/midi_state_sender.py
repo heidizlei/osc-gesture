@@ -61,13 +61,15 @@ def encode_snapshot(hands, split, cutoff, sequence, now, group=1, view=False):
 
 class MidiStateSender:
     def __init__(self, host, port=4200, group=2, stream=1, view_port=None):
-        if not 1 <= group <= 16 or not 0 <= stream <= 255 or not 1 <= port <= 65535:
+        # One Group or several (e.g. 2 for the stage and 3 for the visuals): the same snapshot goes to each
+        groups = sorted(set([group] if isinstance(group, int) else group))
+        if (not groups or not all(1 <= g <= 16 for g in groups)
+                or not 0 <= stream <= 255 or not 1 <= port <= 65535):
             raise ValueError('Invalid MIDI State port, group, or stream')
         if view_port is not None and not 1 <= view_port <= 65535:
             raise ValueError('Invalid gesture view OSC port')
         self.client = SimpleUDPClient(host, port)
-        self.address = f'/midi-state/{group}/{stream}'
-        self.group = group
+        self.targets = [(g, f'/midi-state/{g}/{stream}') for g in groups]
         self.sequence = 0
         self.lock = threading.Lock()
         self.snapshot = ({}, .375, .75, float('-inf'))
@@ -120,10 +122,11 @@ class MidiStateSender:
             view = self.view and not missing
         if missing or time.monotonic() - captured > CAPTURE_TIMEOUT:
             hands = {}
-        clip = encode_snapshot(hands, split, cutoff, self.sequence,
-                               time.monotonic_ns(), self.group, view)
+        now = time.monotonic_ns()
+        for group, address in self.targets:
+            clip = encode_snapshot(hands, split, cutoff, self.sequence, now, group, view)
+            self.client.send_message(address, clip)
         self.sequence = (self.sequence + 1) & 0xffff
-        self.client.send_message(self.address, clip)
 
     def _run(self):
         deadline = time.monotonic()

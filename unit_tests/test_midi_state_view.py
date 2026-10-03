@@ -36,8 +36,7 @@ class ViewControllerTests(unittest.TestCase):
         sender.snapshot = ({}, .375, .75, float('-inf'))
         sender.view = False
         sender.sequence = 0
-        sender.group = 2
-        sender.address = '/midi-state/2/0'
+        sender.targets = [(2, '/midi-state/2/0')]
         sender.client = Mock()
         return sender
 
@@ -57,6 +56,19 @@ class ViewControllerTests(unittest.TestCase):
         for ignored in ((), ('on',), (1, 2)):
             sender._receive_view('/showGestureView', *ignored)
             self.assertTrue(sender.view)
+
+    def test_every_group_gets_the_snapshot(self):
+        sender = self.sender()
+        sender.targets = [(2, '/midi-state/2/1'), (3, '/midi-state/3/1')]
+        sender.set_view(True)
+        sender._send()
+        calls = sender.client.send_message.call_args_list
+        self.assertEqual([c.args[0] for c in calls], ['/midi-state/2/1', '/midi-state/3/1'])
+        for call, group in zip(calls, (2, 3)):
+            clip = call.args[1]
+            self.assertEqual(struct.unpack('>I', clip[44:48])[0] >> 24 & 0xf, group - 1)
+            self.assertEqual(sorted(controllers(clip)), list(range(20, 31)))
+            self.assertEqual(controllers(clip)[30], 0xffffffff)
 
     def test_shutdown_snapshot_returns_to_score(self):
         sender = self.sender()

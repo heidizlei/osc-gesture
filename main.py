@@ -29,7 +29,9 @@ if __name__ == "__main__":
                         help="do not open a browser window on startup")
     parser.add_argument("--midi-state-host", help="enable stage snapshots to this proxy host")
     parser.add_argument("--midi-state-port", default=4200, type=int)
-    parser.add_argument("--midi-state-group", default=2, type=int, choices=range(1, 17))
+    parser.add_argument("--midi-state-group", default="2,3",
+                        help="Group, or Groups separated by commas, to send the snapshots to "
+                             "(default 2,3: the stage and the visualization engine)")
     parser.add_argument("--midi-state-stream", default=1, type=int, choices=range(256),
                         help="stream 1 keeps gestures off the score's stream 0 on the same Group")
     parser.add_argument("--midi-state-view-port", type=int,
@@ -44,6 +46,12 @@ if __name__ == "__main__":
 
     if not 1 <= args.midi_state_port <= 65535:
         parser.error("--midi-state-port must be 1..65535")
+    try:
+        args.midi_state_group = [int(g) for g in str(args.midi_state_group).split(",") if g.strip()]
+    except ValueError:
+        parser.error("--midi-state-group must be numbers 1..16 separated by commas")
+    if not args.midi_state_group or not all(1 <= g <= 16 for g in args.midi_state_group):
+        parser.error("--midi-state-group must be numbers 1..16 separated by commas")
     if args.midi_state_view_port is not None and not 1 <= args.midi_state_view_port <= 65535:
         parser.error("--midi-state-view-port must be 1..65535")
     if args.midi_state_view_port is not None and not args.midi_state_host:
