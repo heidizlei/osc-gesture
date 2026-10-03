@@ -1438,8 +1438,13 @@ class OSCGestureApp:
                 centre = self.map_hand_x_to_val(x, 'piano')
                 self._piano_hands[label] = {
                     'centre': centre, 'locked': False}
-            elif label in self._piano_hands:
-                hand = self._piano_hands[label]
+            else:
+                # A hand that came up without passing through the piano zone
+                # has no window to keep, so it locks one where it crossed
+                # instead of leaving the piano parked on its whole range.
+                hand = self._piano_hands.setdefault(
+                    label, {'centre': self.map_hand_x_to_val(x, 'piano'),
+                            'locked': False})
                 if not hand['locked']:
                     hand['home_window'] = self._window_around(hand['centre'],
                                                               _PIANO_ORCHESTRA)

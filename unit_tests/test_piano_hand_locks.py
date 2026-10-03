@@ -94,8 +94,10 @@ class PianoHandLockTests(unittest.TestCase):
         count = len(self.piano_messages())
         self.frame()
         self.assertEqual(len(self.piano_messages()), count)
+        # Coming back straight into the upper zone locks a window where it
+        # crossed rather than leaving the piano on its whole range.
         self.frame((.8, .2, 'Left'))
-        self.assertFalse(self.app._piano_hands)
+        self.assertEqual(self.piano_messages()[-1], [1, 82, 94, -1, -1])
 
     def test_return_from_strings_immediately_restores_direct_control(self):
         self.frame((.75, .5, 'Right'))
@@ -270,7 +272,7 @@ class PianoHandLockTests(unittest.TestCase):
                         self.assertEqual(len(activations), 2)
                     self.assertTrue(activations)
                     self.assertTrue(all(range_index < i for i in activations))
-                    self.assertFalse(a._piano_hands)
+                    self.assertTrue(a._piano_hands[label]['locked'])
                     count = a.osc_client.send_message.call_count
                     a.mock_hands[label] = (1 - x, .2)
                     for now in (.1, .2):
@@ -456,8 +458,10 @@ class PianoHandLockTests(unittest.TestCase):
         self.assertGreaterEqual(lo, 0)
         centre = self.app._instr_state['strings']['last_val']
         self.assertLessEqual(len(set(range(lo, hi + 1)) & set(range(centre - 8, centre + 9))), 12)
+        # The left hand's own lock now leads; the displaced one is second and
+        # back home with the strings gone.
         self.advance((.25, .2, 'Left'))
-        self.assertEqual(self.piano_messages()[-1][1:3], [61, 77])
+        self.assertEqual(self.piano_messages()[-1][3:5], [61, 77])
 
 
 if __name__ == '__main__':

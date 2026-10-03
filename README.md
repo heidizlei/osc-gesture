@@ -367,7 +367,10 @@ orchestral zone collapse to one message at their mean x, which normally only
 happens when MediaPipe labels both the same. Piano keeps a separate window
 for each hand. Moving a hand into brass or strings locks its last piano
 window at its existing width; it does not widen to two octaves. The locked
-window keeps that width even if the window slider changes afterward.
+window keeps that width even if the window slider changes afterward. A hand
+that enters straight into brass or strings without passing through the piano
+zone locks a window where it crossed, so the piano is never left on its whole
+range while a hand is up.
 
 Strings receive a **+6-semitone offset**, capped at the configured strings
 maximum (94 by default). The whole window stops at that ceiling, preserving
