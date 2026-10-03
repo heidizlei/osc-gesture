@@ -589,7 +589,7 @@
     touch-action: none;
     user-select: none;
   }
-  .mock-hand {
+  .mock-hand, .manual-hand {
     position: absolute;
     width: 46px; height: 46px;
     margin: -23px 0 0 -23px;    /* the stored point is the circle's centre */
@@ -605,12 +605,43 @@
     touch-action: none;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
   }
-  .mock-hand:active { cursor: grabbing; }
+  .mock-hand:active, .manual-hand:active { cursor: grabbing; }
   #mockHandL { background: #f0883e; }
   #mockHandR { background: #6ab3f7; }
   /* Dragged into the excluded region: still there, but out of play, which is
      how a real hand below the boundary is treated. */
-  .mock-hand.out { opacity: 0.4; box-shadow: none; }
+  .mock-hand.out, .manual-hand.out { opacity: 0.4; box-shadow: none; }
+
+  /* ---- stand-in hands over the camera preview ----
+     Translucent because they sit on top of live video: the picture has to
+     read through the circle that is covering the spot it stands for. The
+     ring keeps them legible once the fill goes see-through. */
+  .manual-hand {
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+    box-shadow: none;
+  }
+  .manual-hand[hidden] { display: none; }
+  #manHandL { border: 2px solid rgba(240, 136, 62, 0.95); }
+  #manHandR { border: 2px solid rgba(106, 179, 247, 0.95); }
+
+  /* Shrinks onto the press point over the hold, so holding long enough to
+     place reads as deliberate rather than as a click that did nothing. */
+  #manArm {
+    position: absolute;
+    width: 46px; height: 46px;
+    margin: -23px 0 0 -23px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.9);
+    pointer-events: none;
+    animation: manArm 200ms linear forwards;   /* MANUAL_HOLD_MS re-sets this */
+  }
+  #manArm[hidden] { display: none; }
+  @keyframes manArm {
+    from { transform: scale(2.1); opacity: 0; }
+    to   { transform: scale(1);   opacity: 1; }
+  }
   #mockLogSlot {
     display: flex;
     flex-direction: column;
@@ -709,6 +740,9 @@
         <div class="rlabel" id="labStrings">strings · right hand</div>
         <div class="rlabel" id="labPiano">piano</div>
       </div>
+      <div class="manual-hand" id="manHandL" data-hand="Left" hidden>L</div>
+      <div class="manual-hand" id="manHandR" data-hand="Right" hidden>R</div>
+      <div id="manArm" hidden></div>
       <div id="camPick">
         <select id="camSelect" title="camera used for tracking" disabled>
           <option value="">finding cameras…</option>
@@ -721,7 +755,11 @@
        orchestra mode, drag the amber bar to move the piano split; above it
        the left hand plays brass and the right strings. Each hand holds its last piano
        position in a 24-semitone window while above the split. Returning to piano
-       resumes tracking; no active hands resets both windows.</p>
+       resumes tracking; no active hands resets both windows.
+       If the camera loses a hand, press and hold on that side of the preview to
+       place a stand-in — left half for the left hand, right half for the right.
+       It drags freely, and holding somewhere else moves it there. It drops itself
+       when the real hand returns, and C clears both.</p>
   </section>
 
   <section id="logColumn">
@@ -1182,6 +1220,7 @@ function renderGeometry() {
   }
 
   renderMockHands();
+  renderManualHands();
 }
 
 function hitTest(e, stageEl) {
@@ -1218,7 +1257,7 @@ function valueFromPointer(id, e, stageEl) {
 
 // Anything that owns its own pointer events sits on top of a stage and must
 // not start a bar drag underneath itself.
-const OVERLAY_SELECTOR = "#camPick, .mock-hand";
+const OVERLAY_SELECTOR = "#camPick, .mock-hand, .manual-hand";
 
 for (const v of STAGE_VIEWS) {
   const stageEl = $(v.el);
@@ -1831,13 +1870,17 @@ const MOCK_HANDS = [
 // the polled state so a 10 Hz response cannot fight the pointer.
 let mockDrag = null;
 
-function mockPoint(e) {
-  const r = $("mockStage").getBoundingClientRect();
+// Pointer position as a fraction of a stage, the form both the mock hands
+// and the preview's stand-ins are stored and sent in.
+function pointIn(el, e) {
+  const r = el.getBoundingClientRect();
   return {
     x: clamp((e.clientX - r.left) / r.width, 0, 1),
     y: clamp((e.clientY - r.top) / r.height, 0, 1),
   };
 }
+
+const mockPoint = (e) => pointIn($("mockStage"), e);
 
 function renderMockHands() {
   const exclY = geom().excl;
@@ -1854,29 +1897,30 @@ function renderMockHands() {
 }
 
 // Pointer moves arrive far faster than the loop can use them, so sends are
-// throttled with the last position always going out.
-let mockTimer = null, mockPendingSend = false;
-
-function flushMockHands() {
-  if (!mockDrag) return;
-  send({ mock_hands: { [mockDrag.label]: [mockDrag.x, mockDrag.y] } });
+// throttled with the last position always going out. Call with `true` to
+// flush immediately, which is how a resting position is guaranteed to land.
+function throttledSend(payload, ms) {
+  let timer = null, pending = false;
+  const flush = () => { const body = payload(); if (body) send(body); };
+  return (now = false) => {
+    if (now) {
+      clearTimeout(timer);
+      timer = null;
+      pending = false;
+      flush();
+      return;
+    }
+    if (timer !== null) { pending = true; return; }
+    flush();
+    timer = setTimeout(() => {
+      timer = null;
+      if (pending) { pending = false; flush(); }
+    }, ms);
+  };
 }
 
-function sendMockHands(now = false) {
-  if (now) {
-    clearTimeout(mockTimer);
-    mockTimer = null;
-    mockPendingSend = false;
-    flushMockHands();
-    return;
-  }
-  if (mockTimer !== null) { mockPendingSend = true; return; }
-  flushMockHands();
-  mockTimer = setTimeout(() => {
-    mockTimer = null;
-    if (mockPendingSend) { mockPendingSend = false; flushMockHands(); }
-  }, 60);
-}
+const sendMockHands = throttledSend(
+  () => mockDrag && { mock_hands: { [mockDrag.label]: [mockDrag.x, mockDrag.y] } }, 60);
 
 for (const { id, label } of MOCK_HANDS) {
   const el = $(id);
@@ -1903,6 +1947,144 @@ for (const { id, label } of MOCK_HANDS) {
   el.addEventListener("pointerup", endMockDrag);
   el.addEventListener("pointercancel", endMockDrag);
 }
+
+// ---------------------------------------------------- manual stand-in hands
+
+// When the camera loses a hand mid-performance, one can be placed on the
+// preview to keep that side driving. Creation is deliberate: the press has
+// to be held, because a stray click during a show would plant a hand that
+// silently takes over the output. Once a circle exists it drags freely.
+const MANUAL_HOLD_MS = 200;
+const MANUAL_HANDS = [
+  { id: "manHandL", label: "Left" },
+  { id: "manHandR", label: "Right" },
+];
+
+let manualDrag = null;      // overrides polled state while the pointer owns it
+let manualArm = null;       // a press being held, not yet a hand
+
+// The local drag wins over the poll so a 10 Hz response cannot fight the
+// pointer, exactly as the mock hands do it.
+const manualPos = (label) =>
+  (manualDrag && manualDrag.label === label)
+    ? [manualDrag.x, manualDrag.y]
+    : state?.manual_hands?.[label];
+
+function renderManualHands() {
+  const exclY = geom().excl;
+  for (const { id, label } of MANUAL_HANDS) {
+    const el = $(id);
+    const at = manualPos(label);
+    el.hidden = !at;
+    if (!at) continue;
+    el.style.left = at[0] * 100 + "%";
+    el.style.top = at[1] * 100 + "%";
+    el.classList.toggle("out", at[1] > exclY);
+  }
+}
+
+const sendManualHands = throttledSend(
+  () => manualDrag && { manual_hands: { [manualDrag.label]: [manualDrag.x, manualDrag.y] } }, 60);
+
+function cancelArm() {
+  if (!manualArm) return;
+  clearTimeout(manualArm.timer);
+  manualArm = null;
+  $("manArm").hidden = true;
+}
+
+function endManual() {
+  cancelArm();
+  if (!manualDrag) return;
+  sendManualHands(true);        // the resting position always goes out
+  manualDrag = null;
+  renderManualHands();
+}
+
+// Dragging one that already exists: no hold, it is a small deliberate target.
+for (const { id, label } of MANUAL_HANDS) {
+  const el = $(id);
+  el.addEventListener("pointerdown", (e) => {
+    if (!manualPos(label)) return;
+    manualDrag = { label, ...pointIn($("stage"), e) };
+    el.setPointerCapture(e.pointerId);
+    renderManualHands();
+    e.preventDefault();
+    e.stopPropagation();        // not a bar drag on the stage underneath
+  });
+}
+
+{
+  const stageEl = $("stage");
+
+  stageEl.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(OVERLAY_SELECTOR)) return;   // a circle owns this press
+    if (hitTest(e, stageEl)) return;                  // boundary/split drag wins
+    const at = pointIn(stageEl, e);
+    const label = at.x < 0.5 ? "Left" : "Right";
+    // Only a hand the camera has lost can be stood in for. A press elsewhere
+    // while one is already down is a move, not a second hand: the hold runs
+    // again and that hand switches to the new spot on release.
+    if ((state?.tracked_hands || []).includes(label)) return;
+
+    const arm = $("manArm");
+    arm.hidden = false;
+    arm.style.left = at.x * 100 + "%";
+    arm.style.top = at.y * 100 + "%";
+    arm.style.animation = "none";       // restart the shrink on every press
+    void arm.offsetWidth;
+    // Driven off the constant so the ring always finishes as the hand lands.
+    arm.style.animation = `manArm ${MANUAL_HOLD_MS}ms linear forwards`;
+
+    manualArm = { label, ...at };
+    manualArm.timer = setTimeout(() => {
+      if (!manualArm) return;           // released a hair before the hold was up
+      const held = manualArm;
+      manualArm = null;
+      arm.hidden = true;
+      // Appears already under the pointer, so the hold runs straight into a
+      // drag and releasing is what sets it down.
+      manualDrag = { label: held.label, x: held.x, y: held.y };
+      // Throws if the pointer is already gone, which costs us only the capture.
+      try { stageEl.setPointerCapture(e.pointerId); } catch (_) {}
+      renderManualHands();
+      sendManualHands(true);
+    }, MANUAL_HOLD_MS);
+    e.preventDefault();
+  });
+
+  stageEl.addEventListener("pointermove", (e) => {
+    if (manualArm) {                    // the ring follows until it fires
+      Object.assign(manualArm, pointIn(stageEl, e));
+      const arm = $("manArm");
+      arm.style.left = manualArm.x * 100 + "%";
+      arm.style.top = manualArm.y * 100 + "%";
+      return;
+    }
+    if (!manualDrag) return;
+    Object.assign(manualDrag, pointIn(stageEl, e));
+    renderManualHands();
+    sendManualHands();
+    e.preventDefault();
+  });
+
+  stageEl.addEventListener("pointerup", endManual);
+  stageEl.addEventListener("pointercancel", endManual);
+}
+
+// C clears both stand-ins. Guarded so it cannot fire while a field has focus
+// or steal the copy shortcut.
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "c" && e.key !== "C") return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+  cancelArm();
+  manualDrag = null;
+  if (state) state.manual_hands = {};
+  renderManualHands();
+  send({ clear_manual_hands: true });
+});
 
 $("mockOrchestra").addEventListener("change", (e) =>
   send({ orchestra: e.target.checked }));

@@ -416,6 +416,13 @@ class OSCGestureApp:
         # tab drives nothing until a circle is dragged up into play.
         self.mock_hands = {'Left': (0.30, 0.88), 'Right': (0.70, 0.88)}
 
+        # Stand-in hands for the camera view, placed by hand when tracking
+        # drops one mid-performance. Unlike the mock hands these are a patch
+        # over live detection rather than a replacement for it: a label is
+        # only present here while the camera is failing to find it.
+        self.manual_hands = {}          # label -> (x, y)
+        self._tracked_labels = []       # labels found in the newest detection
+
         self.fps = 0.0
         self._last_frame_time = None
         self._tint = None       # cached solid-colour buffer for the cv2 overlay
@@ -1089,10 +1096,14 @@ class OSCGestureApp:
                     with self._view_lock:
                         positions = [(x, y, label) for label, (x, y) in self.mock_hands.items()]
                 elif frame is not None and results is not None:
-                    positions = [self._hand_position(hand) + (self._handedness(results, index),)
-                                 for index, hand in enumerate(results.hand_landmarks or [])]
+                    positions = self._merge_manual_hands(
+                        [self._hand_position(hand) + (self._handedness(results, index),)
+                         for index, hand in enumerate(results.hand_landmarks or [])])
                 elif self.view == 'gesture' and self.hand_tracker.camera_url and not self.hand_tracker.cap.stale:
                     return output
+                else:
+                    # No frame to report, so stand-ins are all the stage has.
+                    positions = self._manual_positions()
             sender.update(positions, self._orchestra_split_y(), self.active_area_ratio,
                           self._hand_region)
         return output
@@ -1140,36 +1151,49 @@ class OSCGestureApp:
             if self.hand_tracker.camera_url:
                 if not self.hand_tracker.cap.stale:
                     return None, None, []
-                self._gate_positions([])
-                self.hand_present = False
-                self.active_regions = []
-                self.hand_grace.seen.clear()
+                # A dead camera is detecting nothing, so neither slot may stay
+                # marked as tracked: that is exactly when a stand-in is wanted
+                # and the UI refuses to place one over a hand it thinks is live.
+                self._tracked_labels = []
+                # No landmarks arrive without a frame, so gestures stop either
+                # way; only the range a stand-in drives survives the outage.
                 self.gesture_detector.reset()
                 self.gesture_result = ('noop', 0.0)
+                if not self._drive_manual_only():
+                    self._gate_positions([])
+                    self.hand_present = False
+                    self.active_regions = []
+                    self.hand_grace.seen.clear()
+                    self._update_hand_presence()
+                    self._update_region_engagement()
+                    self._send_orchestra_occupancy()
+                self._publish_frame(None, None, [])
+                return None, None, []
+            self._tracked_labels = []
+            if not self._drive_manual_only():
+                self._gate_positions([])
+                self.hand_present = False
+                self.active_regions = (self.hand_grace.update([], [], self._hand_region,
+                    time.monotonic(), self.hand_grace_ms / 1000)
+                    if self.orchestra_control.enabled else [])
                 self._update_hand_presence()
                 self._update_region_engagement()
                 self._send_orchestra_occupancy()
-                self._publish_frame(None, None, [])
-                return None, None, []
-            self._gate_positions([])
-            self.hand_present = False
-            self.active_regions = (self.hand_grace.update([], [], self._hand_region,
-                time.monotonic(), self.hand_grace_ms / 1000)
-                if self.orchestra_control.enabled else [])
-            self._update_hand_presence()
-            self._update_region_engagement()
-            self._send_orchestra_occupancy()
             return None, None, []
 
         self._frame_height = frame.shape[0]
         self._tick_fps()
 
         active_hand_indices = self._active_hand_indices(results)
-        all_positions = [self._hand_position(hand) + (self._handedness(results, i),)
-                         for i, hand in enumerate((results.hand_landmarks or [])[:2])]
+        # Kept apart from all_positions: these index straight into the
+        # detection results, so a stand-in appended below must never reach
+        # them or it would index past the landmarks that actually exist.
+        detected = [self._hand_position(hand) + (self._handedness(results, i),)
+                    for i, hand in enumerate((results.hand_landmarks or [])[:2])]
+        all_positions = self._merge_manual_hands(detected)
         positions = self._gate_positions(all_positions)
         if self.orchestra_mode:
-            active_hand_indices = [i for i, (x, y, label) in enumerate(all_positions)
+            active_hand_indices = [i for i, (x, y, label) in enumerate(detected)
                                    if (label or ('Left' if x < 0.5 else 'Right'))
                                    in self.boundary_gate.ready]
         self.hand_present = bool(positions)
@@ -1710,6 +1734,79 @@ class OSCGestureApp:
         self.active_regions = sorted({self._hand_region(*p) for p in positions})
         self._send_position_updates(positions)
 
+    def set_manual_hands(self, hands):
+        """Place or clear stand-in hands, as {'Left': [x, y], 'Right': None}.
+
+        Coordinates use the same convention as set_mock_hands: normalised to
+        the flipped frame the preview draws, so a placement means what a
+        detected centroid at that spot would mean. None clears that hand.
+        """
+        if not isinstance(hands, dict):
+            raise ValueError("manual_hands must be an object")
+        with self._view_lock:
+            placed = dict(self.manual_hands)
+        for label, xy in hands.items():
+            if label not in ('Left', 'Right'):
+                raise ValueError(f"unknown hand: {label!r}")
+            if xy is None:
+                placed.pop(label, None)
+                continue
+            try:
+                x, y = (float(v) for v in xy)
+            except (TypeError, ValueError):
+                raise ValueError(f"bad position for {label}: {xy!r}")
+            placed[label] = (min(max(x, 0.0), 1.0), min(max(y, 0.0), 1.0))
+        with self._view_lock:
+            self.manual_hands = placed
+        return placed
+
+    def clear_manual_hands(self):
+        with self._view_lock:
+            self.manual_hands = {}
+
+    def _drive_manual_only(self):
+        """Drive the output from stand-ins alone, with no frame to merge into.
+
+        A dead feed is precisely the case stand-ins exist for, so losing the
+        camera must not take them down with it. Mirrors _step_mock: synthetic
+        positions through the real zone logic, so a stand-in drives what a
+        hand in that spot would. Returns False when there is nothing placed,
+        leaving the caller's own no-hands reset to run.
+        """
+        with self._view_lock:
+            manual = sorted(self.manual_hands.items())
+        if not manual:
+            return False
+        positions = self._gate_positions([(x, y, label) for label, (x, y) in manual])
+        self.hand_present = bool(positions)
+        self.active_regions = sorted({self._hand_region(*p) for p in positions})
+        self._send_position_updates(positions)
+        return True
+
+    def _manual_positions(self):
+        with self._view_lock:
+            return [(x, y, label) for label, (x, y) in sorted(self.manual_hands.items())]
+
+    def _merge_manual_hands(self, positions):
+        """Fill the slots tracking has lost with the hands placed by hand.
+
+        A placement only survives while its label is missing from detection,
+        so the moment the real hand comes back the stand-in is dropped and
+        nobody has to clear it mid-performance. Detected hands always win,
+        and the pair stays capped at two so a stand-in can never become a
+        third hand downstream.
+        """
+        seen = {label for _, _, label in positions if label}
+        self._tracked_labels = sorted(seen)
+        with self._view_lock:
+            if seen & self.manual_hands.keys():
+                self.manual_hands = {label: xy for label, xy
+                                     in self.manual_hands.items()
+                                     if label not in seen}
+            manual = sorted(self.manual_hands.items())
+        room = max(0, 2 - len(positions))
+        return positions + [(x, y, label) for label, (x, y) in manual[:room]]
+
     def send_manual_osc(self, address, args):
         """Send one OSC message on behalf of the manual tab.
 
@@ -1794,6 +1891,9 @@ class OSCGestureApp:
             'view':             self.view_requested(),
             'mock_hands':       {k: [round(v[0], 4), round(v[1], 4)]
                                  for k, v in self.mock_hands.items()},
+            'manual_hands':     {k: [round(v[0], 4), round(v[1], 4)]
+                                 for k, v in self.manual_hands.items()},
+            'tracked_hands':    list(self._tracked_labels),
             'orchestra':        self.orchestra_mode,
             'piano_only':       self.piano_only,
             'orchestra_pedal':  self.orchestra_control.state(),
@@ -1950,6 +2050,10 @@ class OSCGestureApp:
             self.request_view(payload['view'])
         if 'mock_hands' in payload:
             self.set_mock_hands(payload['mock_hands'])
+        if 'manual_hands' in payload:
+            self.set_manual_hands(payload['manual_hands'])
+        if payload.get('clear_manual_hands'):
+            self.clear_manual_hands()
         if 'orchestra' in payload:
             self._set_orchestra_mode(bool(payload['orchestra']))
         if 'piano_only' in payload:

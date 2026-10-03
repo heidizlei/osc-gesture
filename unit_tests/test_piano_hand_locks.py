@@ -47,6 +47,8 @@ class PianoHandLockTests(unittest.TestCase):
         a.mode = 'range'
         a.osc_client = Mock()
         a._view_lock = threading.Lock()
+        a.manual_hands = {}
+        a._tracked_labels = []
         a._update_hand_presence = Mock()
         self.clock = patch.object(time, 'time', return_value=100)
         self.clock.start()
