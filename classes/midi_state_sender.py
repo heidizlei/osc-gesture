@@ -1,6 +1,7 @@
 """Opt-in, complete MIDI State gesture snapshots over OSC/UDP."""
 
 import math
+import socket
 import struct
 import threading
 import time
@@ -17,6 +18,8 @@ PERIOD = 0.020
 CAPTURE_TIMEOUT = 0.100
 VIEW_CONTROLLER = 30
 VIEW_ADDRESS = '/showGestureView'
+# MIDI State's multicast address for Group n (SPECIFICATION.md, network push mode)
+MULTICAST_ADDRESS = '239.253.254.{}'
 
 
 def normalized(value):
@@ -60,7 +63,8 @@ def encode_snapshot(hands, split, cutoff, sequence, now, group=1, view=False):
 
 
 class MidiStateSender:
-    def __init__(self, host, port=4200, group=2, stream=1, view_port=None):
+    def __init__(self, host=None, port=4200, group=2, stream=1, view_port=None,
+                 multicast=True, ttl=1, interface=None):
         # One Group or several (e.g. 2 for the stage and 3 for the visuals): the same snapshot goes to each
         groups = sorted(set([group] if isinstance(group, int) else group))
         if (not groups or not all(1 <= g <= 16 for g in groups)
@@ -68,8 +72,22 @@ class MidiStateSender:
             raise ValueError('Invalid MIDI State port, group, or stream')
         if view_port is not None and not 1 <= view_port <= 65535:
             raise ValueError('Invalid gesture view OSC port')
-        self.client = SimpleUDPClient(host, port)
-        self.targets = [(g, f'/midi-state/{g}/{stream}') for g in groups]
+        if not multicast and not host:
+            raise ValueError('MIDI State needs multicast or a host')
+        # Each Group's snapshot goes to its multicast address, and to the unicast host if one is given
+        unicast = SimpleUDPClient(host, port) if host else None
+        self.targets = []
+        for g in groups:
+            clients = [unicast] if unicast else []
+            if multicast:
+                client = SimpleUDPClient(MULTICAST_ADDRESS.format(g), port)
+                client._sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
+                client._sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+                if interface:
+                    client._sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                                            socket.inet_aton(interface))
+                clients.append(client)
+            self.targets.append((g, f'/midi-state/{g}/{stream}', clients))
         self.sequence = 0
         self.lock = threading.Lock()
         self.snapshot = ({}, .375, .75, float('-inf'))
@@ -123,9 +141,10 @@ class MidiStateSender:
         if missing or time.monotonic() - captured > CAPTURE_TIMEOUT:
             hands = {}
         now = time.monotonic_ns()
-        for group, address in self.targets:
+        for group, address, clients in self.targets:
             clip = encode_snapshot(hands, split, cutoff, self.sequence, now, group, view)
-            self.client.send_message(address, clip)
+            for client in clients:
+                client.send_message(address, clip)
         self.sequence = (self.sequence + 1) & 0xffff
 
     def _run(self):

@@ -36,8 +36,8 @@ class ViewControllerTests(unittest.TestCase):
         sender.snapshot = ({}, .375, .75, float('-inf'))
         sender.view = False
         sender.sequence = 0
-        sender.targets = [(2, '/midi-state/2/0')]
         sender.client = Mock()
+        sender.targets = [(2, '/midi-state/2/0', [sender.client])]
         return sender
 
     def sent_view(self, sender, missing=False):
@@ -59,7 +59,7 @@ class ViewControllerTests(unittest.TestCase):
 
     def test_every_group_gets_the_snapshot(self):
         sender = self.sender()
-        sender.targets = [(2, '/midi-state/2/1'), (3, '/midi-state/3/1')]
+        sender.targets = [(2, '/midi-state/2/1', [sender.client]), (3, '/midi-state/3/1', [sender.client])]
         sender.set_view(True)
         sender._send()
         calls = sender.client.send_message.call_args_list

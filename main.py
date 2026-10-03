@@ -27,7 +27,14 @@ if __name__ == "__main__":
                         help="web UI port")
     parser.add_argument("--no-browser", action="store_true",
                         help="do not open a browser window on startup")
-    parser.add_argument("--midi-state-host", help="enable stage snapshots to this proxy host")
+    parser.add_argument("--midi-state-host",
+                        help="also send the snapshots by unicast to this host (they always go by multicast)")
+    parser.add_argument("--no-midi-state", action="store_true",
+                        help="send no MIDI State gesture snapshots")
+    parser.add_argument("--midi-state-ttl", default=1, type=int,
+                        help="multicast TTL (default 1: the local network)")
+    parser.add_argument("--midi-state-interface",
+                        help="IPv4 address of the network interface to multicast on (default: the system's)")
     parser.add_argument("--midi-state-port", default=4200, type=int)
     parser.add_argument("--midi-state-group", default="2,3",
                         help="Group, or Groups separated by commas, to send the snapshots to "
@@ -54,8 +61,10 @@ if __name__ == "__main__":
         parser.error("--midi-state-group must be numbers 1..16 separated by commas")
     if args.midi_state_view_port is not None and not 1 <= args.midi_state_view_port <= 65535:
         parser.error("--midi-state-view-port must be 1..65535")
-    if args.midi_state_view_port is not None and not args.midi_state_host:
-        parser.error("--midi-state-view-port requires --midi-state-host")
+    if args.midi_state_view_port is not None and args.no_midi_state:
+        parser.error("--midi-state-view-port needs MIDI State (drop --no-midi-state)")
+    if not 0 <= args.midi_state_ttl <= 255:
+        parser.error("--midi-state-ttl must be 0..255")
 
     if args.camera_url:
         from urllib.parse import urlparse
@@ -66,11 +75,14 @@ if __name__ == "__main__":
     app = OSCGestureApp(ip=args.host, port=args.port,
                         camera_url=args.camera_url,
                         orchestra_preset=args.orchestra_preset)
-    if args.midi_state_host:
+    if not args.no_midi_state:
         from classes.midi_state_sender import MidiStateSender
+        # Multicast to each Group's address (239.253.254.<group>), plus the unicast host if given
         app.midi_state_sender = MidiStateSender(args.midi_state_host, args.midi_state_port,
                                                 args.midi_state_group, args.midi_state_stream,
-                                                args.midi_state_view_port)
+                                                args.midi_state_view_port, multicast=True,
+                                                ttl=args.midi_state_ttl,
+                                                interface=args.midi_state_interface)
     if args.ui == "web" and getattr(sys, "frozen", False) and sys.platform == "darwin":
         # The .app needs a native event loop to be quittable from the Dock;
         # see classes/mac_app.py.
